@@ -17,4 +17,4 @@ class NavigationConfig:
     terminal_reward: float = 200.0
     out_of_bounds_penalty: float = 10000.0
     distance_shaping_weight: float = 0.5
-    max_steps: int = 400
+    max_steps: int = 300

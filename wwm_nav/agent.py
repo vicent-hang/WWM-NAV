@@ -40,7 +40,7 @@ class WWMNavConfig:
     min_initial_distance_m: float = 800.0
     seed: int = 1
     episodes: int = 500
-    max_steps: int = 400
+    max_steps: int = 300
     replay_size: int = 100_000
     seq_len: int = 32
     batch_size: int = 128
