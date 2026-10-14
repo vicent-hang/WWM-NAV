@@ -11,10 +11,10 @@ class NavigationConfig:
     y_max_m: float = 2000.0
     goal_tolerance_m: float = 30.0
     move_penalty: float = 1.0
-    outage_penalty: float = 40.0
-    high_outage_threshold: float = 0.5
+    outage_penalty: float = 5.0
+    high_outage_threshold: float = 0.45
     high_outage_reward_penalty: float = 0.0
     terminal_reward: float = 200.0
     out_of_bounds_penalty: float = 10000.0
-    distance_shaping_weight: float = 0.5
+    distance_shaping_weight: float = 2.0
     max_steps: int = 300

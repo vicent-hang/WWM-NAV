@@ -36,10 +36,10 @@ class WWMNavConfig:
     save_dir: Path = Path("outputs/wwm_nav")
     start_m: tuple[float, float] = (100.0, 100.0)
     goal_m: tuple[float, float] = (1400.0, 1600.0)
-    train_goal_mode: str = "fixed"
+    train_goal_mode: str = "random_starts_fixed_goal"
     min_initial_distance_m: float = 800.0
     seed: int = 1
-    episodes: int = 500
+    episodes: int = 1500
     max_steps: int = 300
     replay_size: int = 100_000
     seq_len: int = 32
@@ -47,11 +47,11 @@ class WWMNavConfig:
     actor_batch_size: int = 128
     rssm_updates_per_step: int = 1
     actor_updates_per_step: int = 1
-    outage_penalty: float = 40.0
+    outage_penalty: float = 5.0
     high_outage_reward_penalty: float = 0.0
     high_outage_threshold: float = 0.45
     terminal_reward: float = 200.0
-    distance_shaping_weight: float = 0.5
+    distance_shaping_weight: float = 2.0
     gamma: float = 0.99
     rssm_lr: float = 1.0e-4
     actor_lr: float = 1.0e-4
@@ -63,7 +63,7 @@ class WWMNavConfig:
     rssm_latent_type: str = "categorical"
     rssm_classes: int = 16
     rssm_unimix: float = 0.01
-    physical_num_bs: int = 4
+    physical_num_bs: int = 10
     physical_context_embed_dim: int = 64
     building_patch_size: int = 9
     building_patch_embed_dim: int = 64
@@ -86,7 +86,7 @@ class WWMNavConfig:
     reward_clip_max: float = 200.0
     reward_normalize: bool = False
     actor_hidden_dims: tuple[int, ...] = (256, 256)
-    actor_imagine_horizon: int = 15
+    actor_imagine_horizon: int = 10
     actor_entropy_weight: float = 0.002
     actor_lambda: float = 0.95
     actor_target_update_fraction: float = 0.01
@@ -97,22 +97,22 @@ class WWMNavConfig:
     actor_advantage_norm_rate: float = 0.01
     actor_norm_min_scale: float = 1.0e-4
     actor_navigation_prior: bool = True
-    actor_navigation_prior_style: str = "snarm_q_soft"
+    actor_navigation_prior_style: str = "snarm_q_hard"
     actor_navigation_prior_weight: float = 0.1
     actor_navigation_prior_min_weight: float = 0.1
-    actor_navigation_prior_decay_steps: int = 1
-    actor_navigation_prior_temperature_m: float = 100.0
-    actor_navigation_prior_init_actor: bool = False
-    actor_navigation_prior_pretrain_updates: int = 0
-    actor_navigation_prior_pretrain_samples: int = 20_000
+    actor_navigation_prior_decay_steps: int = 0
+    actor_navigation_prior_temperature_m: float = 80.0
+    actor_navigation_prior_init_actor: bool = True
+    actor_navigation_prior_pretrain_updates: int = 5_000
+    actor_navigation_prior_pretrain_samples: int = 100_000
     actor_navigation_prior_pretrain_batch_size: int = 256
-    actor_navigation_prior_init_critic: bool = False
-    actor_navigation_prior_critic_updates: int = 0
-    actor_navigation_prior_critic_samples: int = 20_000
+    actor_navigation_prior_init_critic: bool = True
+    actor_navigation_prior_critic_updates: int = 5_000
+    actor_navigation_prior_critic_samples: int = 100_000
     actor_navigation_prior_critic_batch_size: int = 256
     sample_rssm_state: bool = False
     mask_outbound_actions: bool = True
-    eval_every_episodes: int = 25
+    eval_every_episodes: int = 20
     device: str = "cuda"
 
     @property

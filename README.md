@@ -43,9 +43,11 @@ Train with command-line flags:
 python scripts/train_wwm_nav.py \
   --radiomap data/sample_radiomap.npz \
   --save-dir outputs/sample \
-  --episodes 500 \
   --device cuda
 ```
+
+Unspecified training options use the canonical research-one contract in
+`WWMNavConfig`, including 1,500 episodes and 300 steps per episode.
 
 Or use the documented YAML contract:
 
