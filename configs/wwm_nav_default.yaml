@@ -1,0 +1,16 @@
+# Minimal WWM-NAV reference configuration.
+# The scripts expose these fields as command-line flags; this file documents
+# the intended default experiment contract for open-source users.
+method: WWM-NAV
+radiomap: data/sample_radiomap.npz
+start_m: [100.0, 100.0]
+goal_m: [1400.0, 1600.0]
+episodes: 500
+max_steps: 400
+outage_penalty: 40.0
+high_outage_threshold: 0.45
+high_outage_reward_penalty: 0.0
+actor_imagine_horizon: 15
+seq_len: 32
+batch_size: 128
+actor_batch_size: 128
