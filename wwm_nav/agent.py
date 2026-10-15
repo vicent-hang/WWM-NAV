@@ -17,10 +17,10 @@ import torch
 from torch.nn import functional as F
 
 from wwm_nav.config import NavigationConfig
-from wwm_nav.c28_5_map import (
+from wwm_nav.wwm_nav_map import (
     file_sha256,
     semantic_npz_sha256,
-    validate_c28_5_prepared_map,
+    validate_wwm_nav_generated_map,
 )
 from wwm_nav.env import ACTIONS, GridNavigationEnv
 from wwm_nav.models.dreamer_actor_critic import (
@@ -38,14 +38,14 @@ from wwm_nav.radiomap import RadioMap
 
 PREVIOUS_ACTION_OFFSET = 6
 METHOD_NAME = "WWM-NAV"
-EXPERIMENT_CONTRACT = "c28_5_wwm_nav_reproduction_v1"
+EXPERIMENT_CONTRACT = "wwm_nav_reproduction_v1"
 LATENT_REFRESH_INTERVAL = 25
 
 
 @dataclass(frozen=True)
 class WWMNavConfig:
     radiomap_path: Path
-    save_dir: Path = Path("outputs/c28_5_wwm_nav_seed1")
+    save_dir: Path = Path("outputs/wwm_nav_seed1")
     start_m: tuple[float, float] = (100.0, 100.0)
     goal_m: tuple[float, float] = (1400.0, 1600.0)
     train_goal_mode: str = "random_starts_fixed_goal"
@@ -72,8 +72,6 @@ class WWMNavConfig:
     rssm_deter_dim: int = 128
     rssm_stoch_dim: int = 32
     rssm_hidden_dim: int = 128
-    rssm_min_std: float = 0.1
-    rssm_latent_type: str = "categorical"
     rssm_classes: int = 16
     rssm_unimix: float = 0.01
     physical_num_bs: int = 10
@@ -127,12 +125,11 @@ class WWMNavConfig:
     actor_navigation_prior_critic_updates: int = 5_000
     actor_navigation_prior_critic_samples: int = 100_000
     actor_navigation_prior_critic_batch_size: int = 256
-    best_link_weight: float = 0.0
     sample_rssm_state: bool = False
     mask_outbound_actions: bool = True
     eval_every_episodes: int = 20
     checkpoint_every_episodes: int = 20
-    strict_c28_5_contract: bool = True
+    strict_wwm_nav_contract: bool = True
     resume_checkpoint_path: Path | None = None
     device: str = "cuda"
 
@@ -167,8 +164,8 @@ def serializable_config(config: WWMNavConfig) -> dict[str, object]:
     }
 
 
-def validate_c28_5_config(config: WWMNavConfig) -> None:
-    if not config.strict_c28_5_contract:
+def validate_wwm_nav_config(config: WWMNavConfig) -> None:
+    if not config.strict_wwm_nav_contract:
         return
     expected = {
         "start_m": (100.0, 100.0),
@@ -193,13 +190,11 @@ def validate_c28_5_config(config: WWMNavConfig) -> None:
         "rssm_lr": 1.0e-4,
         "actor_lr": 1.0e-4,
         "critic_lr": 1.0e-4,
-        "rssm_latent_type": "categorical",
         "rssm_deter_dim": 128,
         "rssm_stoch_dim": 32,
         "rssm_classes": 16,
         "rssm_hidden_dim": 128,
         "rssm_embed_dim": 64,
-        "rssm_min_std": 0.1,
         "rssm_unimix": 0.01,
         "obs_weight": 1.0,
         "reward_weight": 0.05,
@@ -252,12 +247,11 @@ def validate_c28_5_config(config: WWMNavConfig) -> None:
         "physical_context_embed_dim": 64,
         "building_patch_size": 9,
         "building_patch_embed_dim": 64,
-        "best_link_weight": 0.0,
         "sample_rssm_state": False,
         "mask_outbound_actions": True,
         "eval_every_episodes": 20,
         "checkpoint_every_episodes": 20,
-        "strict_c28_5_contract": True,
+        "strict_wwm_nav_contract": True,
         "device": "cuda",
     }
     mismatches = {
@@ -266,8 +260,8 @@ def validate_c28_5_config(config: WWMNavConfig) -> None:
         if getattr(config, key) != expected_value
     }
     if mismatches:
-        raise ValueError(f"strict C28.5 configuration mismatch: {mismatches}")
-    validate_c28_5_prepared_map(config.radiomap_path)
+        raise ValueError(f"strict WWM-NAV configuration mismatch: {mismatches}")
+    validate_wwm_nav_generated_map(config.radiomap_path)
 
 
 class EpisodeSequenceReplay:
@@ -1020,8 +1014,6 @@ def initialize_models(radio_map: RadioMap, config: WWMNavConfig, device):
         deter_dim=config.rssm_deter_dim,
         stoch_dim=config.rssm_stoch_dim,
         hidden_dim=config.rssm_hidden_dim,
-        min_std=config.rssm_min_std,
-        latent_type=config.rssm_latent_type,
         classes=config.rssm_classes,
         unimix=config.rssm_unimix,
         physical_context_dim=RadioMap.physical_context_dim(config.physical_num_bs),
@@ -1030,7 +1022,7 @@ def initialize_models(radio_map: RadioMap, config: WWMNavConfig, device):
         building_patch_embed_dim=config.building_patch_embed_dim,
     )
     rssm_model = RSSMWorldModel(rssm_config).to(device)
-    # The registered C28.5 implementation constructs two legacy Q networks
+    # The registered WWM-NAV implementation constructs two legacy Q networks
     # before the Actor. They are inactive in DreamerV3 Actor mode, but their
     # initialization advances Torch RNG and therefore belongs to the seed contract.
     DuelingQNetwork(
@@ -1224,7 +1216,7 @@ def save_training_state(path: Path, state: dict[str, object]) -> None:
 
 
 def train(config: WWMNavConfig) -> dict[str, list[float]]:
-    validate_c28_5_config(config)
+    validate_wwm_nav_config(config)
     rng = set_seed(config.seed)
     device = resolve_device(config.device)
     radio_map = RadioMap.from_npz(config.radiomap_path, require_physics=True)
@@ -1306,7 +1298,7 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
             config.resume_checkpoint_path, map_location=device, weights_only=False
         )
         if state.get("experiment_contract") != EXPERIMENT_CONTRACT:
-            raise ValueError("resume checkpoint is not a compatible C28.5 WWM-NAV state")
+            raise ValueError("resume checkpoint is not a compatible WWM-NAV state")
         if state.get("config") != _resume_config_payload(config):
             raise ValueError("resume checkpoint configuration does not match this run")
         if state.get("radiomap_semantic_sha256") != semantic_npz_sha256(
@@ -1691,7 +1683,7 @@ def evaluate(
     checkpoint_path: Path | None = None,
     deterministic: bool = True,
 ) -> dict[str, object]:
-    validate_c28_5_config(config)
+    validate_wwm_nav_config(config)
     set_seed(config.seed)
     device = resolve_device(config.device)
     radio_map = RadioMap.from_npz(config.radiomap_path, require_physics=True)
@@ -1700,7 +1692,7 @@ def evaluate(
     path = checkpoint_path or (config.save_dir / "checkpoint.pt")
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     if checkpoint.get("experiment_contract") != EXPERIMENT_CONTRACT:
-        raise ValueError("checkpoint is not a compatible C28.5 WWM-NAV model")
+        raise ValueError("checkpoint is not a compatible WWM-NAV model")
     checkpoint_map_identity = checkpoint.get("provenance", {}).get(
         "radiomap_semantic_sha256"
     )

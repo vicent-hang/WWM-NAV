@@ -3,11 +3,8 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.egg-info/
-.pytest_cache/
 .ruff_cache/
 .mypy_cache/
-.coverage
-htmlcov/
 
 # Environments
 .venv/
@@ -16,9 +13,6 @@ venv/
 
 # Local artifacts
 data/
-data/*.npz
-data/c28_5/radioenvir_c28_5.npz
-data/c28_5/radioenvir_c28_5.manifest.json
 outputs/
 checkpoints/
 *.pt

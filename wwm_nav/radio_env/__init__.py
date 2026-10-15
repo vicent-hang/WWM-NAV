@@ -1,6 +1,6 @@
-"""C28.5 SNARM-style physical radio-environment generation."""
+"""WWM-NAV SNARM-style physical radio-environment generation."""
 
-from wwm_nav.radio_env.snarm_like import (
+from wwm_nav.radio_env.wwm_nav_radio import (
     SnarmLikeRadioEnvironment,
     SnarmRadioConfig,
     SnarmRadioMapData,

@@ -21,7 +21,7 @@ class MLP(nn.Module):
 
 
 class DuelingQNetwork(nn.Module):
-    """Legacy C28.5 Q network retained to preserve model-init RNG ordering."""
+    """Legacy WWM-NAV Q network retained to preserve model-init RNG ordering."""
 
     def __init__(
         self,

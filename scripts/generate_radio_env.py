@@ -6,20 +6,28 @@ from pathlib import Path
 import numpy as np
 
 from wwm_nav.radio_env import SnarmLikeRadioEnvironment, SnarmRadioConfig
+from wwm_nav.wwm_nav_map import (
+    WWM_NAV_FAST_FADING_SAMPLES,
+    WWM_NAV_GENERATION_SEED,
+    WWM_NAV_LOS_SAMPLES,
+    WWM_NAV_MAP_CONTRACT,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate the C28.5 SNARM-style physical radio environment."
+        description="Generate the WWM-NAV SNARM-style physical radio environment."
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("data/radioenvir_c28_5_generated.npz"),
+        default=Path("data/wwm_nav/radioenvir_wwm_nav.npz"),
     )
-    parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--fast-fading-samples", type=int, default=1000)
-    parser.add_argument("--los-samples", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=WWM_NAV_GENERATION_SEED)
+    parser.add_argument(
+        "--fast-fading-samples", type=int, default=WWM_NAV_FAST_FADING_SAMPLES
+    )
+    parser.add_argument("--los-samples", type=int, default=WWM_NAV_LOS_SAMPLES)
     return parser.parse_args()
 
 
@@ -43,6 +51,10 @@ def main() -> None:
         bs_loc_km=radio_data.bs_loc_km,
         sector_boresite_deg=radio_data.sector_boresite_deg,
         bs_power_watt=np.asarray([radio_data.bs_power_watt], dtype=np.float64),
+        bs_power_watt_by_bs=np.full(
+            radio_data.bs_loc_km.shape[0], radio_data.bs_power_watt, dtype=np.float64
+        ),
+        active_original_bs_ids=np.arange(radio_data.bs_loc_km.shape[0], dtype=np.int64),
         height_map=radio_data.height_map,
         best_bs=radio_data.best_bs,
         best_sector=radio_data.best_sector,
@@ -51,8 +63,12 @@ def main() -> None:
         bs_downtilt_deg=np.asarray([config.bs_downtilt_deg], dtype=np.float64),
         carrier_freq_ghz=np.asarray([config.carrier_freq_ghz], dtype=np.float64),
         los_samples=np.asarray([config.los_samples], dtype=np.int64),
+        fast_fading_samples=np.asarray([config.fast_fading_samples], dtype=np.int64),
+        generation_seed=np.asarray([int(args.seed)], dtype=np.int64),
+        wwm_nav_map_contract=np.asarray(WWM_NAV_MAP_CONTRACT),
+        best_link_labels_valid=np.asarray([1], dtype=np.int8),
     )
-    print(f"saved C28.5 radio environment: {args.output}")
+    print(f"saved WWM-NAV radio environment: {args.output}")
     print(f"outage shape: {radio_data.outage.shape}")
     print(
         "outage min/max: "

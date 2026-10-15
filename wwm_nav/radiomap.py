@@ -31,10 +31,6 @@ class RadioMap:
     bs_downtilt_deg: float = 100.0
     carrier_freq_ghz: float = 2.0
     los_samples: int = 100
-    dynamic_outage_states: np.ndarray | None = None
-    transition_stride: int | None = None
-    interference_update_period_steps: int | None = None
-    interference_move_probability: float | None = None
 
     @classmethod
     def from_npz(cls, path: str | Path, coordinate_scale: float = 10.0, require_physics: bool = False) -> "RadioMap":
@@ -42,7 +38,7 @@ class RadioMap:
         if not path.exists():
             raise FileNotFoundError(
                 f"radio map file not found: {path}. "
-                "Generate one with: python3 -m scripts/generate_sample_map.py"
+                "Generate one with: python scripts/generate_radio_env.py"
             )
         data = np.load(path, allow_pickle=False)
         outage = np.asarray(data["arr_0"], dtype=np.float64)
@@ -72,7 +68,7 @@ class RadioMap:
             missing = sorted(physics_fields.difference(fields))
             raise ValueError(
                 "radio map is missing physics fields required by physics-conditioned RSSM+Q: "
-                f"{missing}. Regenerate it with: python3 -m scripts/generate_sample_map.py --model snarm_like"
+                f"{missing}. Regenerate it with: python scripts/generate_radio_env.py"
             )
 
         bs_loc_km = np.asarray(data["bs_loc_km"], dtype=np.float64) if "bs_loc_km" in fields else None
@@ -114,55 +110,6 @@ class RadioMap:
             if "los_samples" in fields
             else 100
         )
-        dynamic_outage_states = (
-            np.asarray(data["dynamic_outage_states"], dtype=np.float64)
-            if "dynamic_outage_states" in fields
-            else None
-        )
-        transition_stride = (
-            int(np.asarray(data["transition_stride"]).reshape(()).item())
-            if "transition_stride" in fields
-            else None
-        )
-        interference_update_period_steps = (
-            int(np.asarray(data["interference_update_period_steps"]).reshape(()).item())
-            if "interference_update_period_steps" in fields
-            else None
-        )
-        interference_move_probability = (
-            float(np.asarray(data["interference_move_probability"]).reshape(()).item())
-            if "interference_move_probability" in fields
-            else None
-        )
-
-        dynamic_fields = (
-            dynamic_outage_states,
-            transition_stride,
-            interference_update_period_steps,
-            interference_move_probability,
-        )
-        if any(value is not None for value in dynamic_fields):
-            if not all(value is not None for value in dynamic_fields):
-                raise ValueError("dynamic interference metadata must be complete")
-            assert dynamic_outage_states is not None
-            if dynamic_outage_states.shape != (7, *outage.shape):
-                raise ValueError(
-                    "dynamic_outage_states must have shape "
-                    f"{(7, *outage.shape)}, got {dynamic_outage_states.shape}"
-                )
-            if (
-                not np.all(np.isfinite(dynamic_outage_states))
-                or np.any(dynamic_outage_states < 0.0)
-                or np.any(dynamic_outage_states > 1.0)
-            ):
-                raise ValueError("dynamic outage probabilities must be finite and in [0, 1]")
-            if transition_stride not in {-3, -2, -1, 1, 2, 3}:
-                raise ValueError("dynamic transition_stride must be one of +/-1, +/-2, +/-3")
-            if interference_update_period_steps != 4:
-                raise ValueError("dynamic interference update period must be 4 steps")
-            if not np.isclose(interference_move_probability, 0.9, rtol=0.0, atol=1e-12):
-                raise ValueError("dynamic interference move probability must be 0.9")
-
         if best_bs is not None and best_bs.shape != outage.shape:
             raise ValueError(f"best_bs shape {best_bs.shape} does not match outage shape {outage.shape}")
         if best_sector is not None and best_sector.shape != outage.shape:
@@ -206,10 +153,6 @@ class RadioMap:
             bs_downtilt_deg=bs_downtilt_deg,
             carrier_freq_ghz=carrier_freq_ghz,
             los_samples=los_samples,
-            dynamic_outage_states=dynamic_outage_states,
-            transition_stride=transition_stride,
-            interference_update_period_steps=interference_update_period_steps,
-            interference_move_probability=interference_move_probability,
         )
 
     @property
@@ -250,21 +193,6 @@ class RadioMap:
         return self.outage_at_index(self.nearest_index(xy_m))
 
     @property
-    def has_dynamic_interference(self) -> bool:
-        return self.dynamic_outage_states is not None
-
-    def dynamic_outage_at_xy(
-        self,
-        state_id: int,
-        xy_m: np.ndarray | list[float] | tuple[float, float],
-    ) -> float:
-        if self.dynamic_outage_states is None:
-            raise ValueError("this RadioMap has no dynamic interference states")
-        if not 0 <= int(state_id) < self.dynamic_outage_states.shape[0]:
-            raise ValueError(f"invalid dynamic interference state id: {state_id}")
-        return float(self.dynamic_outage_states[int(state_id)][self.nearest_index(xy_m)])
-
-    @property
     def has_physics(self) -> bool:
         return (
             self.bs_loc_km is not None
@@ -285,7 +213,7 @@ class RadioMap:
         if not self.has_physics:
             raise ValueError(
                 "this RadioMap has no physical BS/building fields; regenerate the map with "
-                "python3 -m scripts/generate_sample_map.py --model snarm_like"
+                "python scripts/generate_radio_env.py"
             )
 
     @staticmethod
@@ -366,27 +294,6 @@ class RadioMap:
                 dtype=np.float32,
             )
         return rows.reshape(-1)
-
-    def best_link_label_at_xy(
-        self,
-        xy_m: np.ndarray | list[float] | tuple[float, float],
-        num_bs: int,
-    ) -> int:
-        self.require_physics()
-        assert self.best_bs is not None
-        assert self.best_sector is not None
-        assert self.bs_loc_km is not None
-        index = self.nearest_index(xy_m)
-        best_bs = int(self.best_bs[index])
-        best_sector = int(self.best_sector[index])
-        bs_m = self.bs_loc_km * 1000.0
-        xy = np.asarray(xy_m, dtype=np.float64)
-        distances = np.linalg.norm(xy[None, :] - bs_m[:, :2], axis=1)
-        nearest = np.argsort(distances)[: max(int(num_bs), 0)]
-        matches = np.where(nearest == best_bs)[0]
-        if matches.size == 0:
-            return -1
-        return int(matches[0]) * self.sector_count + best_sector
 
     def link_los_clearance(
         self,

@@ -15,8 +15,7 @@ pip install -e .[dev]
 Run lightweight checks locally when possible:
 
 ```bash
-python -m compileall wwm_nav scripts tests
-pytest
+python -m compileall wwm_nav scripts
 ruff check .
 ```
 

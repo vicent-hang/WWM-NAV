@@ -17,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("outputs/c28_5_wwm_nav_seed1/eval_trajectory.png"),
+        default=Path("outputs/wwm_nav_seed1/eval_trajectory.png"),
     )
     parser.add_argument("--start", nargs=2, type=float, default=(100.0, 100.0))
     parser.add_argument("--goal", nargs=2, type=float, default=(1400.0, 1600.0))

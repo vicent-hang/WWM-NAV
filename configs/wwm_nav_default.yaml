@@ -1,9 +1,9 @@
 # Canonical WWM-NAV research-one configuration.
 # Paths are adapted to this standalone repository; the training parameters
-# follow the C28.5 contract documented in the source repository.
+# follow the WWM-NAV contract documented in the source repository.
 method: WWM-NAV
-radiomap: data/c28_5/radioenvir_c28_5.npz
-save_dir: outputs/c28_5_wwm_nav_seed1
+radiomap: data/wwm_nav/radioenvir_wwm_nav.npz
+save_dir: outputs/wwm_nav_seed1
 start_m: [100.0, 100.0]
 goal_m: [1400.0, 1600.0]
 train_goal_mode: random_starts_fixed_goal
@@ -30,8 +30,6 @@ rssm_embed_dim: 64
 rssm_deter_dim: 128
 rssm_stoch_dim: 32
 rssm_hidden_dim: 128
-rssm_min_std: 0.1
-rssm_latent_type: categorical
 rssm_classes: 16
 rssm_unimix: 0.01
 physical_num_bs: 10
@@ -85,11 +83,10 @@ actor_navigation_prior_init_critic: true
 actor_navigation_prior_critic_updates: 5000
 actor_navigation_prior_critic_samples: 100000
 actor_navigation_prior_critic_batch_size: 256
-best_link_weight: 0.0
 sample_rssm_state: false
 mask_outbound_actions: true
 eval_every_episodes: 20
 checkpoint_every_episodes: 20
-strict_c28_5_contract: true
+strict_wwm_nav_contract: true
 resume_checkpoint_path: null
 device: cuda

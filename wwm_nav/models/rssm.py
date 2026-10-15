@@ -15,19 +15,12 @@ class RSSMConfig:
     deter_dim: int = 128
     stoch_dim: int = 32
     hidden_dim: int = 128
-    min_std: float = 0.1
-    latent_type: str = "continuous"
     classes: int = 16
     unimix: float = 0.01
-    patch_size: int = 0
-    patch_embed_dim: int = 64
     physical_context_dim: int = 0
     physical_context_embed_dim: int = 64
     building_patch_size: int = 0
     building_patch_embed_dim: int = 64
-    best_link_classes: int = 0
-    upload_head: bool = False
-    download_head: bool = False
 
 
 class LowDimEncoder(nn.Module):
@@ -45,7 +38,7 @@ class LowDimEncoder(nn.Module):
 
 
 class LocalPatchEncoder(nn.Module):
-    """CNN encoder for local radio map outage patches centered at the UAV."""
+    """CNN encoder for local building-height patches centered at the UAV."""
 
     def __init__(self, embed_dim: int) -> None:
         super().__init__()
@@ -65,151 +58,7 @@ class LocalPatchEncoder(nn.Module):
 
 
 class RSSMState(dict):
-    """Dictionary state container used by continuous and categorical RSSMs."""
-
-
-class ContinuousRSSM(nn.Module):
-    """DreamerV2-style continuous RSSM adapted to low-dimensional UAV observations."""
-
-    def __init__(self, config: RSSMConfig) -> None:
-        super().__init__()
-        self.config = config
-        self.action_dim = int(config.action_dim)
-        self.stoch_dim = int(config.stoch_dim)
-        self.deter_dim = int(config.deter_dim)
-        self.min_std = float(config.min_std)
-        self.feat_dim = self.stoch_dim + self.deter_dim
-        self.context_dim = int(config.physical_context_embed_dim) if int(config.physical_context_dim) > 0 else 0
-
-        self.img_in = nn.Sequential(
-            nn.Linear(self.stoch_dim + self.action_dim + self.context_dim, config.hidden_dim),
-            nn.ELU(),
-        )
-        self.gru = nn.GRUCell(config.hidden_dim, self.deter_dim)
-        self.prior_net = nn.Sequential(
-            nn.Linear(self.deter_dim, config.hidden_dim),
-            nn.ELU(),
-            nn.Linear(config.hidden_dim, 2 * self.stoch_dim),
-        )
-        self.post_net = nn.Sequential(
-            nn.Linear(self.deter_dim + config.embed_dim, config.hidden_dim),
-            nn.ELU(),
-            nn.Linear(config.hidden_dim, 2 * self.stoch_dim),
-        )
-
-    def initial(self, batch_size: int, device) -> RSSMState:
-        return RSSMState(
-            mean=torch.zeros(batch_size, self.stoch_dim, device=device),
-            std=torch.ones(batch_size, self.stoch_dim, device=device),
-            stoch=torch.zeros(batch_size, self.stoch_dim, device=device),
-            deter=torch.zeros(batch_size, self.deter_dim, device=device),
-        )
-
-    def get_feat(self, state: dict[str, torch.Tensor]) -> torch.Tensor:
-        return torch.cat([state["stoch"], state["deter"]], dim=-1)
-
-    def img_step(
-        self,
-        prev_state: dict[str, torch.Tensor],
-        action: torch.Tensor,
-        context: torch.Tensor | None = None,
-        sample: bool = True,
-    ) -> RSSMState:
-        action_one_hot = F.one_hot(action.long(), num_classes=self.action_dim).float()
-        if self.context_dim > 0:
-            if context is None:
-                context = torch.zeros(action_one_hot.shape[0], self.context_dim, device=action_one_hot.device)
-            x = torch.cat([prev_state["stoch"], action_one_hot, context.float()], dim=-1)
-        else:
-            x = torch.cat([prev_state["stoch"], action_one_hot], dim=-1)
-        x = self.img_in(x)
-        deter = self.gru(x, prev_state["deter"])
-        mean, std = self._stats(self.prior_net(deter))
-        stoch = self._sample(mean, std) if sample else mean
-        return RSSMState(mean=mean, std=std, stoch=stoch, deter=deter)
-
-    def obs_step(
-        self,
-        prev_state: dict[str, torch.Tensor],
-        action: torch.Tensor,
-        embed: torch.Tensor,
-        context: torch.Tensor | None = None,
-        sample: bool = True,
-    ) -> tuple[RSSMState, RSSMState]:
-        prior = self.img_step(prev_state, action, context=context, sample=sample)
-        x = torch.cat([prior["deter"], embed], dim=-1)
-        mean, std = self._stats(self.post_net(x))
-        stoch = self._sample(mean, std) if sample else mean
-        post = RSSMState(mean=mean, std=std, stoch=stoch, deter=prior["deter"])
-        return post, prior
-
-    def observe(
-        self,
-        embeds: torch.Tensor,
-        actions: torch.Tensor,
-        contexts: torch.Tensor | None = None,
-        state: dict[str, torch.Tensor] | None = None,
-        resets: torch.Tensor | None = None,
-        sample: bool = True,
-    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-        batch_size, horizon = actions.shape[:2]
-        if state is None:
-            state = self.initial(batch_size, actions.device)
-        if resets is not None and resets.shape != actions.shape:
-            raise ValueError("RSSM resets must have the same [batch, time] shape as actions")
-        posts: dict[str, list[torch.Tensor]] = {key: [] for key in ("mean", "std", "stoch", "deter")}
-        priors: dict[str, list[torch.Tensor]] = {key: [] for key in ("mean", "std", "stoch", "deter")}
-        for t in range(horizon):
-            if resets is not None:
-                reset_t = resets[:, t].to(dtype=torch.bool)
-                initial = self.initial(batch_size, actions.device)
-                state = {
-                    key: torch.where(
-                        reset_t.reshape(batch_size, *([1] * (value.ndim - 1))),
-                        initial[key],
-                        value,
-                    )
-                    for key, value in state.items()
-                }
-            context_t = contexts[:, t] if contexts is not None else None
-            post, prior = self.obs_step(state, actions[:, t], embeds[:, t], context=context_t, sample=sample)
-            for key in posts:
-                posts[key].append(post[key])
-                priors[key].append(prior[key])
-            state = post
-        return (
-            {key: torch.stack(value, dim=1) for key, value in posts.items()},
-            {key: torch.stack(value, dim=1) for key, value in priors.items()},
-        )
-
-    def imagine(
-        self,
-        actions: torch.Tensor,
-        state: dict[str, torch.Tensor],
-        contexts: torch.Tensor | None = None,
-        sample: bool = False,
-    ) -> dict[str, torch.Tensor]:
-        priors: dict[str, list[torch.Tensor]] = {key: [] for key in ("mean", "std", "stoch", "deter")}
-        current = state
-        for t in range(actions.shape[1]):
-            context_t = contexts[:, t] if contexts is not None else None
-            current = self.img_step(current, actions[:, t], context=context_t, sample=sample)
-            for key in priors:
-                priors[key].append(current[key])
-        return {key: torch.stack(value, dim=1) for key, value in priors.items()}
-
-    def _stats(self, raw_stats: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        mean, raw_std = raw_stats.chunk(2, dim=-1)
-        std = F.softplus(raw_std) + self.min_std
-        return mean, std
-
-    @staticmethod
-    def _sample(mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
-        return mean + torch.randn_like(mean) * std
-
-    @staticmethod
-    def kl(post: dict[str, torch.Tensor], prior: dict[str, torch.Tensor]) -> torch.Tensor:
-        return gaussian_kl(post, prior)
+    """Dictionary state container used by the categorical RSSM."""
 
 
 class CategoricalRSSM(nn.Module):
@@ -412,21 +261,12 @@ class CategoricalRSSM(nn.Module):
 
 
 class RSSMWorldModel(nn.Module):
-    """Low-dimensional DreamerV2-style world model with RSSM latent dynamics."""
+    """Physics-conditioned DreamerV3-style categorical world model."""
 
     def __init__(self, config: RSSMConfig) -> None:
         super().__init__()
         self.config = config
-        latent_type = str(config.latent_type)
         self.encoder = LowDimEncoder(config.observation_dim, config.embed_dim, config.hidden_dim)
-        self.patch_encoder = LocalPatchEncoder(config.patch_embed_dim) if config.patch_size > 0 else None
-        if self.patch_encoder is not None:
-            self.encoder_fusion = nn.Sequential(
-                nn.Linear(config.embed_dim + config.patch_embed_dim, config.embed_dim),
-                nn.ELU(),
-            )
-        else:
-            self.encoder_fusion = None
         self.context_embed_dim = int(config.physical_context_embed_dim) if int(config.physical_context_dim) > 0 else 0
         self.physical_context_encoder = (
             nn.Sequential(
@@ -448,12 +288,7 @@ class RSSMWorldModel(nn.Module):
             )
         else:
             self.context_fusion = None
-        if latent_type == "continuous":
-            self.rssm = ContinuousRSSM(config)
-        elif latent_type == "categorical":
-            self.rssm = CategoricalRSSM(config)
-        else:
-            raise ValueError(f"unknown RSSM latent_type: {latent_type}")
+        self.rssm = CategoricalRSSM(config)
         feat_dim = int(self.rssm.feat_dim)
         self.feat_dim = feat_dim
         head_input_dim = feat_dim + self.context_embed_dim
@@ -482,35 +317,11 @@ class RSSMWorldModel(nn.Module):
             nn.ELU(),
             nn.Linear(config.hidden_dim, 1),
         )
-        self.upload_head = (
-            nn.Sequential(
-                nn.Linear(head_input_dim, config.hidden_dim),
-                nn.ELU(),
-                nn.Linear(config.hidden_dim, 1),
-            )
-            if bool(config.upload_head or config.download_head)
-            else None
-        )
-        self.best_link_head = (
-            nn.Sequential(
-                nn.Linear(head_input_dim, config.hidden_dim),
-                nn.ELU(),
-                nn.Linear(config.hidden_dim, int(config.best_link_classes)),
-            )
-            if int(config.best_link_classes) > 0
-            else None
-        )
 
-    def encode_observations(self, observations: torch.Tensor, patches: torch.Tensor | None = None) -> torch.Tensor:
+    def encode_observations(self, observations: torch.Tensor) -> torch.Tensor:
         batch_shape = observations.shape[:-1]
         flat = observations.reshape(-1, observations.shape[-1])
         embed = self.encoder(flat)
-        if self.patch_encoder is not None:
-            if patches is None:
-                raise ValueError("RSSMConfig.patch_size > 0 requires local radio map patches")
-            flat_patches = patches.reshape(-1, patches.shape[-3], patches.shape[-2], patches.shape[-1])
-            patch_embed = self.patch_encoder(flat_patches)
-            embed = self.encoder_fusion(torch.cat([embed, patch_embed], dim=-1))
         return embed.reshape(*batch_shape, -1)
 
     def encode_physical_contexts(
@@ -556,17 +367,12 @@ class RSSMWorldModel(nn.Module):
             "high_outage_logits": self.high_outage_head(feat).squeeze(-1),
             "done_logits": self.done_head(feat).squeeze(-1),
         }
-        if self.upload_head is not None:
-            result["uploads"] = self.upload_head(feat).squeeze(-1)
-        if self.best_link_head is not None:
-            result["best_link_logits"] = self.best_link_head(feat)
         return result
 
     def observe_sequence(
         self,
         observations: torch.Tensor,
         actions: torch.Tensor,
-        patches: torch.Tensor | None = None,
         physical_contexts: torch.Tensor | None = None,
         building_patches: torch.Tensor | None = None,
         resets: torch.Tensor | None = None,
@@ -577,8 +383,7 @@ class RSSMWorldModel(nn.Module):
         dict[str, torch.Tensor],
         dict[str, torch.Tensor],
     ]:
-        patch_inputs = patches[:, 1:] if patches is not None else None
-        embeds = self.encode_observations(observations[:, 1:], patch_inputs)
+        embeds = self.encode_observations(observations[:, 1:])
         context_embeds = self.encode_physical_contexts(physical_contexts, building_patches)
         post, prior = self.rssm.observe(
             embeds,
@@ -596,13 +401,11 @@ class RSSMWorldModel(nn.Module):
         self,
         observations: torch.Tensor,
         actions: torch.Tensor,
-        patches: torch.Tensor | None = None,
         physical_contexts: torch.Tensor | None = None,
         building_patches: torch.Tensor | None = None,
         sample: bool = False,
     ) -> dict[str, torch.Tensor]:
-        patch_inputs = patches[:, 1:] if patches is not None else None
-        embeds = self.encode_observations(observations[:, 1:], patch_inputs)
+        embeds = self.encode_observations(observations[:, 1:])
         context_embeds = self.encode_physical_contexts(physical_contexts, building_patches)
         post, _ = self.rssm.observe(embeds, actions, contexts=context_embeds, sample=sample)
         return {key: value[:, -1] for key, value in post.items()}
@@ -622,20 +425,8 @@ class RSSMWorldModel(nn.Module):
         return prior, pred
 
 
-def gaussian_kl(
-    post: dict[str, torch.Tensor],
-    prior: dict[str, torch.Tensor],
-) -> torch.Tensor:
-    post_var = post["std"].pow(2)
-    prior_var = prior["std"].pow(2)
-    kl = torch.log(prior["std"] / post["std"])
-    kl = kl + (post_var + (post["mean"] - prior["mean"]).pow(2)) / (2.0 * prior_var)
-    kl = kl - 0.5
-    return kl.sum(dim=-1)
-
-
 def rssm_kl(
-    rssm: ContinuousRSSM | CategoricalRSSM,
+    rssm: CategoricalRSSM,
     post: dict[str, torch.Tensor],
     prior: dict[str, torch.Tensor],
 ) -> torch.Tensor:
