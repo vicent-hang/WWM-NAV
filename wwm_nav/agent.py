@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import csv
 import json
+import platform
+import random
+import subprocess
+import sys
 from argparse import Namespace
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -13,6 +17,11 @@ import torch
 from torch.nn import functional as F
 
 from wwm_nav.config import NavigationConfig
+from wwm_nav.c28_5_map import (
+    file_sha256,
+    semantic_npz_sha256,
+    validate_c28_5_prepared_map,
+)
 from wwm_nav.env import ACTIONS, GridNavigationEnv
 from wwm_nav.models.dreamer_actor_critic import (
     DreamerCritic,
@@ -23,17 +32,20 @@ from wwm_nav.models.dreamer_actor_critic import (
     update_slow_target,
 )
 from wwm_nav.models.losses import rssm_loss
+from wwm_nav.models.q_network import DuelingQNetwork
 from wwm_nav.models.rssm import RSSMConfig, RSSMWorldModel
 from wwm_nav.radiomap import RadioMap
 
 PREVIOUS_ACTION_OFFSET = 6
 METHOD_NAME = "WWM-NAV"
+EXPERIMENT_CONTRACT = "c28_5_wwm_nav_reproduction_v1"
+LATENT_REFRESH_INTERVAL = 25
 
 
 @dataclass(frozen=True)
 class WWMNavConfig:
     radiomap_path: Path
-    save_dir: Path = Path("outputs/wwm_nav")
+    save_dir: Path = Path("outputs/c28_5_wwm_nav_seed1")
     start_m: tuple[float, float] = (100.0, 100.0)
     goal_m: tuple[float, float] = (1400.0, 1600.0)
     train_goal_mode: str = "random_starts_fixed_goal"
@@ -60,6 +72,7 @@ class WWMNavConfig:
     rssm_deter_dim: int = 128
     rssm_stoch_dim: int = 32
     rssm_hidden_dim: int = 128
+    rssm_min_std: float = 0.1
     rssm_latent_type: str = "categorical"
     rssm_classes: int = 16
     rssm_unimix: float = 0.01
@@ -86,6 +99,7 @@ class WWMNavConfig:
     reward_clip_max: float = 200.0
     reward_normalize: bool = False
     actor_hidden_dims: tuple[int, ...] = (256, 256)
+    q_hidden_dims: tuple[int, ...] = (256, 256)
     actor_imagine_horizon: int = 10
     actor_entropy_weight: float = 0.002
     actor_lambda: float = 0.95
@@ -96,6 +110,9 @@ class WWMNavConfig:
     actor_return_norm_rate: float = 0.01
     actor_advantage_norm_rate: float = 0.01
     actor_norm_min_scale: float = 1.0e-4
+    actor_goal_progress_weight: float = 0.0
+    actor_goal_progress_clip: float = 1.0
+    actor_goal_terminal_bonus: float = 0.0
     actor_navigation_prior: bool = True
     actor_navigation_prior_style: str = "snarm_q_hard"
     actor_navigation_prior_weight: float = 0.1
@@ -110,9 +127,13 @@ class WWMNavConfig:
     actor_navigation_prior_critic_updates: int = 5_000
     actor_navigation_prior_critic_samples: int = 100_000
     actor_navigation_prior_critic_batch_size: int = 256
+    best_link_weight: float = 0.0
     sample_rssm_state: bool = False
     mask_outbound_actions: bool = True
     eval_every_episodes: int = 20
+    checkpoint_every_episodes: int = 20
+    strict_c28_5_contract: bool = True
+    resume_checkpoint_path: Path | None = None
     device: str = "cuda"
 
     @property
@@ -125,17 +146,128 @@ class WWMNavConfig:
 
 
 def resolve_device(device: str):
-    if device == "cuda" and not torch.cuda.is_available():
-        return torch.device("cpu")
+    if device == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
 
 
 def set_seed(seed: int) -> np.random.Generator:
+    random.seed(int(seed))
     np.random.seed(int(seed))
     torch.manual_seed(int(seed))
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(int(seed))
     return np.random.default_rng(int(seed))
+
+
+def serializable_config(config: WWMNavConfig) -> dict[str, object]:
+    return {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in asdict(config).items()
+    }
+
+
+def validate_c28_5_config(config: WWMNavConfig) -> None:
+    if not config.strict_c28_5_contract:
+        return
+    expected = {
+        "start_m": (100.0, 100.0),
+        "goal_m": (1400.0, 1600.0),
+        "train_goal_mode": "random_starts_fixed_goal",
+        "min_initial_distance_m": 800.0,
+        "seed": 1,
+        "episodes": 1500,
+        "max_steps": 300,
+        "replay_size": 100_000,
+        "seq_len": 32,
+        "batch_size": 128,
+        "actor_batch_size": 128,
+        "rssm_updates_per_step": 1,
+        "actor_updates_per_step": 1,
+        "outage_penalty": 5.0,
+        "high_outage_reward_penalty": 0.0,
+        "high_outage_threshold": 0.45,
+        "terminal_reward": 200.0,
+        "distance_shaping_weight": 2.0,
+        "gamma": 0.99,
+        "rssm_lr": 1.0e-4,
+        "actor_lr": 1.0e-4,
+        "critic_lr": 1.0e-4,
+        "rssm_latent_type": "categorical",
+        "rssm_deter_dim": 128,
+        "rssm_stoch_dim": 32,
+        "rssm_classes": 16,
+        "rssm_hidden_dim": 128,
+        "rssm_embed_dim": 64,
+        "rssm_min_std": 0.1,
+        "rssm_unimix": 0.01,
+        "obs_weight": 1.0,
+        "reward_weight": 0.05,
+        "outage_weight": 5.0,
+        "done_weight": 0.1,
+        "prior_obs_weight": 1.0,
+        "prior_reward_weight": 0.05,
+        "prior_outage_weight": 5.0,
+        "prior_done_weight": 0.1,
+        "kl_balance_style": "dreamerv3",
+        "kl_weight": 1.0,
+        "dynamics_kl_weight": 0.5,
+        "representation_kl_weight": 0.1,
+        "free_nats": 1.0,
+        "high_outage_head_weight": 2.0,
+        "reward_clip": True,
+        "reward_clip_min": -200.0,
+        "reward_clip_max": 200.0,
+        "reward_normalize": False,
+        "actor_imagine_horizon": 10,
+        "actor_hidden_dims": (256, 256),
+        "q_hidden_dims": (256, 256),
+        "actor_entropy_weight": 0.002,
+        "actor_lambda": 0.95,
+        "actor_target_update_fraction": 0.01,
+        "actor_grad_clip": 100.0,
+        "actor_unimix": 0.01,
+        "actor_outscale": 0.01,
+        "actor_return_norm_rate": 0.01,
+        "actor_advantage_norm_rate": 0.01,
+        "actor_norm_min_scale": 1.0e-4,
+        "actor_goal_progress_weight": 0.0,
+        "actor_goal_progress_clip": 1.0,
+        "actor_goal_terminal_bonus": 0.0,
+        "actor_navigation_prior": True,
+        "actor_navigation_prior_style": "snarm_q_hard",
+        "actor_navigation_prior_weight": 0.1,
+        "actor_navigation_prior_min_weight": 0.1,
+        "actor_navigation_prior_decay_steps": 0,
+        "actor_navigation_prior_temperature_m": 80.0,
+        "actor_navigation_prior_init_actor": True,
+        "actor_navigation_prior_pretrain_updates": 5_000,
+        "actor_navigation_prior_pretrain_samples": 100_000,
+        "actor_navigation_prior_pretrain_batch_size": 256,
+        "actor_navigation_prior_init_critic": True,
+        "actor_navigation_prior_critic_updates": 5_000,
+        "actor_navigation_prior_critic_samples": 100_000,
+        "actor_navigation_prior_critic_batch_size": 256,
+        "physical_num_bs": 10,
+        "physical_context_embed_dim": 64,
+        "building_patch_size": 9,
+        "building_patch_embed_dim": 64,
+        "best_link_weight": 0.0,
+        "sample_rssm_state": False,
+        "mask_outbound_actions": True,
+        "eval_every_episodes": 20,
+        "checkpoint_every_episodes": 20,
+        "strict_c28_5_contract": True,
+        "device": "cuda",
+    }
+    mismatches = {
+        key: {"expected": expected_value, "actual": getattr(config, key)}
+        for key, expected_value in expected.items()
+        if getattr(config, key) != expected_value
+    }
+    if mismatches:
+        raise ValueError(f"strict C28.5 configuration mismatch: {mismatches}")
+    validate_c28_5_prepared_map(config.radiomap_path)
 
 
 class EpisodeSequenceReplay:
@@ -236,6 +368,21 @@ class EpisodeSequenceReplay:
             "state_xy_m": torch.as_tensor(np.stack(state_xy_batch), dtype=torch.float32, device=device),
             "goal_xy_m": torch.as_tensor(np.stack(goal_xy_batch), dtype=torch.float32, device=device),
         }
+
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "capacity_steps": self.capacity_steps,
+            "episodes": self.episodes,
+            "current": self.current,
+            "total_steps": self.total_steps,
+        }
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        if int(state["capacity_steps"]) != self.capacity_steps:
+            raise ValueError("resume replay capacity does not match the current configuration")
+        self.episodes = list(state["episodes"])
+        self.current = state["current"]
+        self.total_steps = int(state["total_steps"])
 
 
 def build_online_observation(env: GridNavigationEnv, state_m: np.ndarray, previous_action: int | None, step_fraction: float, config: WWMNavConfig) -> np.ndarray:
@@ -352,6 +499,198 @@ def actor_navigation_prior_weight(config: WWMNavConfig, global_step: int) -> flo
     return minimum + (initial - minimum) * (1.0 - progress)
 
 
+def initialize_actor_snarm_style(
+    rssm_model,
+    actor,
+    actor_optimizer,
+    radio_map: RadioMap,
+    config: WWMNavConfig,
+    rng: np.random.Generator,
+    device,
+    cache: PhysicalContextCache,
+) -> dict[str, float]:
+    if (
+        not (config.actor_navigation_prior_init_actor or config.actor_navigation_prior)
+        or config.actor_navigation_prior_pretrain_updates <= 0
+        or config.actor_navigation_prior_pretrain_samples <= 0
+    ):
+        return {
+            "actor_nav_prior_pretrain_loss": 0.0,
+            "actor_nav_prior_pretrain_match_rate": 0.0,
+        }
+
+    sample_count = int(config.actor_navigation_prior_pretrain_samples)
+    x_min, x_max, y_min, y_max = radio_map.bounds_m
+    env = make_env(radio_map, np.asarray(config.goal_m, dtype=np.float64), config)
+    states = np.column_stack(
+        (
+            rng.uniform(x_min, x_max, size=sample_count),
+            rng.uniform(y_min, y_max, size=sample_count),
+        )
+    ).astype(np.float64)
+    states = np.asarray([env.snap_to_map(state) for state in states], dtype=np.float32)
+    states_t = torch.as_tensor(states, dtype=torch.float32, device=device)
+    goal_t = torch.as_tensor(
+        np.asarray(config.goal_m, dtype=np.float32).reshape(1, 2),
+        dtype=torch.float32,
+        device=device,
+    )
+    batch_size = min(
+        max(int(config.actor_navigation_prior_pretrain_batch_size), 1), sample_count
+    )
+    losses: list[float] = []
+    match_rates: list[float] = []
+    actor.train()
+    for _ in range(int(config.actor_navigation_prior_pretrain_updates)):
+        indices = torch.randint(0, sample_count, (batch_size,), device=device)
+        xy_m = states_t[indices]
+        goal_m = goal_t.expand(batch_size, -1)
+        previous_action = torch.full((batch_size,), -1, dtype=torch.long, device=device)
+        step_fraction = torch.zeros(batch_size, dtype=torch.float32, device=device)
+        latent_state = rssm_model.rssm.initial(batch_size, device)
+        actor_features, _ = dreamer_actor_features(
+            rssm_model,
+            radio_map,
+            latent_state,
+            xy_m,
+            goal_m,
+            previous_action,
+            step_fraction,
+            device,
+            config,
+            cache,
+        )
+        valid_mask = (
+            valid_action_mask_for_xy(radio_map, xy_m, device)
+            if config.mask_outbound_actions
+            else torch.ones(batch_size, config.action_dim, dtype=torch.bool, device=device)
+        )
+        prior_probs = navigation_prior_probs_for_xy(
+            radio_map, xy_m, goal_m, valid_mask, config, device
+        ).detach()
+        distribution = actor.distribution(actor_features, valid_mask=valid_mask)
+        actor_probs = distribution.probs.clamp_min(1.0e-8)
+        if config.actor_navigation_prior_style == "snarm_q_hard":
+            target = torch.argmax(prior_probs, dim=-1)
+            loss = F.nll_loss(torch.log(actor_probs), target)
+        else:
+            loss = -(prior_probs * torch.log(actor_probs)).sum(dim=-1).mean()
+        actor_optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(actor.parameters(), config.actor_grad_clip)
+        actor_optimizer.step()
+        with torch.no_grad():
+            updated = actor.distribution(actor_features, valid_mask=valid_mask)
+            match_rate = (
+                torch.argmax(updated.probs, dim=-1) == torch.argmax(prior_probs, dim=-1)
+            ).float().mean()
+        losses.append(float(loss.detach().cpu()))
+        match_rates.append(float(match_rate.detach().cpu()))
+    return {
+        "actor_nav_prior_pretrain_loss": float(np.mean(losses)) if losses else 0.0,
+        "actor_nav_prior_pretrain_match_rate": (
+            float(np.mean(match_rates)) if match_rates else 0.0
+        ),
+    }
+
+
+def initialize_critic_snarm_style(
+    rssm_model,
+    critic,
+    critic_optimizer,
+    radio_map: RadioMap,
+    config: WWMNavConfig,
+    rng: np.random.Generator,
+    device,
+    cache: PhysicalContextCache,
+) -> dict[str, float]:
+    if (
+        not config.actor_navigation_prior_init_critic
+        or config.actor_navigation_prior_critic_updates <= 0
+        or config.actor_navigation_prior_critic_samples <= 0
+    ):
+        return {
+            "critic_nav_prior_init_loss": 0.0,
+            "critic_nav_prior_init_mae": 0.0,
+            "critic_nav_prior_init_target_mean": 0.0,
+        }
+
+    sample_count = int(config.actor_navigation_prior_critic_samples)
+    x_min, x_max, y_min, y_max = radio_map.bounds_m
+    env = make_env(radio_map, np.asarray(config.goal_m, dtype=np.float64), config)
+    states = np.column_stack(
+        (
+            rng.uniform(x_min, x_max, size=sample_count),
+            rng.uniform(y_min, y_max, size=sample_count),
+        )
+    ).astype(np.float64)
+    states = np.asarray([env.snap_to_map(state) for state in states], dtype=np.float32)
+    states_t = torch.as_tensor(states, dtype=torch.float32, device=device)
+    goal_t = torch.as_tensor(
+        np.asarray(config.goal_m, dtype=np.float32).reshape(1, 2),
+        dtype=torch.float32,
+        device=device,
+    )
+    batch_size = min(
+        max(int(config.actor_navigation_prior_critic_batch_size), 1), sample_count
+    )
+    losses: list[float] = []
+    maes: list[float] = []
+    target_means: list[float] = []
+    critic.train()
+    for _ in range(int(config.actor_navigation_prior_critic_updates)):
+        indices = torch.randint(0, sample_count, (batch_size,), device=device)
+        xy_m = states_t[indices]
+        goal_m = goal_t.expand(batch_size, -1)
+        previous_action = torch.full((batch_size,), -1, dtype=torch.long, device=device)
+        step_fraction = torch.zeros(batch_size, dtype=torch.float32, device=device)
+        latent_state = rssm_model.rssm.initial(batch_size, device)
+        critic_features, _ = dreamer_actor_features(
+            rssm_model,
+            radio_map,
+            latent_state,
+            xy_m,
+            goal_m,
+            previous_action,
+            step_fraction,
+            device,
+            config,
+            cache,
+        )
+        valid_mask = (
+            valid_action_mask_for_xy(radio_map, xy_m, device)
+            if config.mask_outbound_actions
+            else torch.ones(batch_size, config.action_dim, dtype=torch.bool, device=device)
+        )
+        q_prior = snarm_q_prior_for_xy(radio_map, xy_m, goal_m, device)
+        safe_mask = torch.where(
+            valid_mask.sum(dim=-1, keepdim=True) == 0,
+            torch.ones_like(valid_mask, dtype=torch.bool),
+            valid_mask,
+        )
+        target = torch.where(
+            safe_mask, q_prior, torch.full_like(q_prior, -1.0e9)
+        ).max(dim=-1).values.detach()
+        values = critic(critic_features)
+        loss = F.mse_loss(values, target)
+        critic_optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(critic.parameters(), config.actor_grad_clip)
+        critic_optimizer.step()
+        with torch.no_grad():
+            mae = torch.mean(torch.abs(critic(critic_features) - target))
+        losses.append(float(loss.detach().cpu()))
+        maes.append(float(mae.detach().cpu()))
+        target_means.append(float(target.detach().mean().cpu()))
+    return {
+        "critic_nav_prior_init_loss": float(np.mean(losses)) if losses else 0.0,
+        "critic_nav_prior_init_mae": float(np.mean(maes)) if maes else 0.0,
+        "critic_nav_prior_init_target_mean": (
+            float(np.mean(target_means)) if target_means else 0.0
+        ),
+    }
+
+
 def dreamer_navigation_features(radio_map: RadioMap, xy_m, goal_m, previous_actions, step_fraction, config: WWMNavConfig):
     x_min, x_max, y_min, y_max = radio_map.bounds_m
     scale = xy_m.new_tensor([x_max - x_min, y_max - y_min]).clamp_min(1.0)
@@ -392,18 +731,32 @@ def make_env(radio_map: RadioMap, goal_m: np.ndarray, config: WWMNavConfig) -> G
 
 
 def sample_episode_task(radio_map: RadioMap, config: WWMNavConfig, rng: np.random.Generator):
+    start = np.asarray(config.start_m, dtype=np.float64)
     goal = np.asarray(config.goal_m, dtype=np.float64)
     if config.train_goal_mode == "fixed":
-        return np.asarray(config.start_m, dtype=np.float64), goal
+        return start, goal
     if config.train_goal_mode != "random_starts_fixed_goal":
         raise ValueError("supported train_goal_mode values: fixed, random_starts_fixed_goal")
-    x_min, x_max, y_min, y_max = radio_map.bounds_m
     for _ in range(10_000):
-        candidate = np.asarray([rng.uniform(x_min, x_max), rng.uniform(y_min, y_max)], dtype=np.float64)
-        candidate = radio_map.index_to_xy(radio_map.nearest_index(candidate))
-        if np.linalg.norm(candidate - goal) >= float(config.min_initial_distance_m):
-            return candidate, goal
+        start = sample_map_point(radio_map, rng, margin_m=50.0)
+        if np.linalg.norm(goal - start) >= float(config.min_initial_distance_m):
+            return start, goal
     raise RuntimeError("failed to sample a start far enough from the goal")
+
+
+def sample_map_point(
+    radio_map: RadioMap,
+    rng: np.random.Generator,
+    margin_m: float,
+) -> np.ndarray:
+    x_min, x_max, y_min, y_max = radio_map.bounds_m
+    valid_x = radio_map.x_m[
+        (radio_map.x_m >= x_min + margin_m) & (radio_map.x_m <= x_max - margin_m)
+    ]
+    valid_y = radio_map.y_m[
+        (radio_map.y_m >= y_min + margin_m) & (radio_map.y_m <= y_max - margin_m)
+    ]
+    return np.asarray([rng.choice(valid_x), rng.choice(valid_y)], dtype=np.float64)
 
 
 def update_latent_with_feedback(rssm_model: RSSMWorldModel, latent_state: dict[str, object], radio_map: RadioMap, action: int, next_obs: np.ndarray, next_state_xy_m: np.ndarray, device, config: WWMNavConfig, cache: PhysicalContextCache):
@@ -461,7 +814,7 @@ def update_rssm_network(rssm_model, optimizer, replay, radio_map, rng, config, d
     batch = replay.sample_batch(config.batch_size, config.seq_len, rng, device)
     batch = add_physical_context_to_batch(batch, radio_map, config, device, cache)
     args = rssm_training_args(config)
-    loss, metrics = rssm_loss(rssm_model, batch, args, 0.0, 1.0, radio_map, sample=config.sample_rssm_state)
+    loss, metrics = rssm_loss(rssm_model, batch, args, 0.0, 1.0, radio_map, sample=True)
     optimizer.zero_grad()
     loss.backward()
     torch.nn.utils.clip_grad_norm_(rssm_model.parameters(), config.actor_grad_clip)
@@ -485,7 +838,12 @@ def physics_dreamer_v3_imagine(rssm_model, actor, start_state, start_xy_m, goal_
     rewards = []
     outages = []
     done_probs = []
-    reward_components = {"predicted_env_reward": [], "total_reward": []}
+    reward_components = {
+        "predicted_env_reward": [],
+        "goal_progress_reward": [],
+        "terminal_bonus": [],
+        "total_reward": [],
+    }
     for _ in range(horizon):
         actor_feat, _ = dreamer_actor_features(rssm_model, radio_map, current, xy_m, goal_m, prev_action, step_frac, device, config, cache)
         valid_mask = valid_action_mask_for_xy(radio_map, xy_m, device) if config.mask_outbound_actions else torch.ones(actor_feat.shape[0], config.action_dim, dtype=torch.bool, device=device)
@@ -494,17 +852,29 @@ def physics_dreamer_v3_imagine(rssm_model, actor, start_state, start_xy_m, goal_
         action_probs = dist.probs
         prior_probs = navigation_prior_probs_for_xy(radio_map, xy_m, goal_m, valid_mask, config, device) if config.actor_navigation_prior else torch.zeros_like(action_probs)
         next_xy = deterministic_next_xy_tensor(radio_map, xy_m, action, device)
+        current_distance = torch.linalg.norm(xy_m - goal_m, dim=-1)
+        next_distance = torch.linalg.norm(next_xy - goal_m, dim=-1)
         next_step_frac = torch.clamp(step_frac + 1.0 / max(float(config.max_steps), 1.0), 0.0, 1.0)
         physical_context, building_patch = physical_context_tensors(radio_map, next_xy, config, device, cache)
         next_context = rssm_model.encode_physical_contexts(physical_context, building_patch)
         with torch.no_grad():
             current = rssm_model.rssm.img_step(current, action, context=next_context, sample=config.sample_rssm_state)
             pred = rssm_model.heads_from_feat(rssm_model.rssm.get_feat(current), next_context)
-            reward = pred["rewards"].detach()
+            predicted_env_reward = pred["rewards"].detach()
             outage = pred["outages"].detach().clamp(0.0, 1.0)
             done_prob = torch.sigmoid(pred["done_logits"]).detach()
-            terminal = torch.linalg.norm(next_xy - goal_m, dim=-1) <= float(NavigationConfig().goal_tolerance_m)
-            done_prob = torch.maximum(done_prob, terminal.to(done_prob.dtype))
+            step_scale = max(float(np.mean(radio_map.resolution_m)), 1.0)
+            progress = torch.clamp(
+                (current_distance - next_distance) / step_scale,
+                -float(config.actor_goal_progress_clip),
+                float(config.actor_goal_progress_clip),
+            )
+            terminal = next_distance <= float(NavigationConfig().goal_tolerance_m)
+            goal_progress_reward = float(config.actor_goal_progress_weight) * progress
+            terminal_bonus = terminal.to(predicted_env_reward.dtype) * float(
+                config.actor_goal_terminal_bonus
+            )
+            reward = predicted_env_reward + goal_progress_reward + terminal_bonus
         features.append(actor_feat)
         actions.append(action)
         log_probs.append(dist.log_prob(action))
@@ -514,7 +884,9 @@ def physics_dreamer_v3_imagine(rssm_model, actor, start_state, start_xy_m, goal_
         rewards.append(reward)
         outages.append(outage)
         done_probs.append(done_prob)
-        reward_components["predicted_env_reward"].append(reward)
+        reward_components["predicted_env_reward"].append(predicted_env_reward)
+        reward_components["goal_progress_reward"].append(goal_progress_reward)
+        reward_components["terminal_bonus"].append(terminal_bonus)
         reward_components["total_reward"].append(reward)
         xy_m = next_xy.detach()
         prev_action = action.detach()
@@ -648,6 +1020,7 @@ def initialize_models(radio_map: RadioMap, config: WWMNavConfig, device):
         deter_dim=config.rssm_deter_dim,
         stoch_dim=config.rssm_stoch_dim,
         hidden_dim=config.rssm_hidden_dim,
+        min_std=config.rssm_min_std,
         latent_type=config.rssm_latent_type,
         classes=config.rssm_classes,
         unimix=config.rssm_unimix,
@@ -657,6 +1030,15 @@ def initialize_models(radio_map: RadioMap, config: WWMNavConfig, device):
         building_patch_embed_dim=config.building_patch_embed_dim,
     )
     rssm_model = RSSMWorldModel(rssm_config).to(device)
+    # The registered C28.5 implementation constructs two legacy Q networks
+    # before the Actor. They are inactive in DreamerV3 Actor mode, but their
+    # initialization advances Torch RNG and therefore belongs to the seed contract.
+    DuelingQNetwork(
+        config.observation_dim, config.action_dim, tuple(config.q_hidden_dims)
+    ).to(device)
+    DuelingQNetwork(
+        config.observation_dim, config.action_dim, tuple(config.q_hidden_dims)
+    ).to(device)
     actor_input_dim = dreamer_actor_feature_dim(rssm_model, config)
     actor = DreamerV3DiscreteActor(actor_input_dim, config.action_dim, tuple(config.actor_hidden_dims), config.actor_unimix, config.actor_outscale).to(device)
     critic = DreamerCritic(actor_input_dim, tuple(config.actor_hidden_dims)).to(device)
@@ -665,31 +1047,316 @@ def initialize_models(radio_map: RadioMap, config: WWMNavConfig, device):
     return rssm_model, actor, critic, target_critic
 
 
+def source_code_provenance() -> dict[str, object]:
+    repository = Path(__file__).resolve().parents[1]
+
+    def git_output(*arguments: str) -> str | None:
+        try:
+            completed = subprocess.run(
+                ("git", *arguments),
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        return completed.stdout.strip()
+
+    commit = git_output("rev-parse", "HEAD")
+    status = git_output("status", "--porcelain", "--untracked-files=all")
+    return {
+        "code_commit": commit,
+        "code_worktree_dirty": None if status is None else bool(status),
+    }
+
+
+def runtime_provenance(device) -> dict[str, object]:
+    cuda_available = bool(torch.cuda.is_available())
+    return {
+        "python_version": sys.version,
+        "platform": platform.platform(),
+        "numpy_version": np.__version__,
+        "torch_version": torch.__version__,
+        "resolved_device": str(device),
+        "cuda_available": cuda_available,
+        "cuda_version": torch.version.cuda,
+        "cudnn_version": torch.backends.cudnn.version() if cuda_available else None,
+        "cuda_device_name": (
+            torch.cuda.get_device_name(device) if device.type == "cuda" else None
+        ),
+    }
+
+
+def rollout_summary(
+    rollout: dict[str, object], goal_m: np.ndarray, high_outage_threshold: float
+) -> dict[str, float]:
+    states = np.asarray(rollout["states"], dtype=np.float64)
+    actions = np.asarray(rollout["actions"], dtype=np.int64)
+    outages = np.asarray(rollout["outages"], dtype=np.float64)
+    terminals = np.asarray(rollout["terminals"], dtype=np.bool_)
+    success = bool(terminals[-1]) if terminals.size else False
+    high_count = int(np.count_nonzero(outages >= high_outage_threshold)) if outages.size else 0
+    return {
+        "success": float(success),
+        "steps": float(len(actions)),
+        "final_distance": float(np.linalg.norm(states[-1] - goal_m)),
+        "mean_outage": float(np.mean(outages)) if outages.size else 0.0,
+        "max_outage": float(np.max(outages)) if outages.size else 0.0,
+        "high_outage_count": float(high_count),
+        "high_outage_rate": float(high_count / len(outages)) if outages.size else 0.0,
+    }
+
+
+def shortest_success_key(summary: dict[str, float]) -> tuple[float, ...]:
+    success_rank = 0.0 if summary["success"] > 0.5 else 1.0
+    if summary["success"] > 0.5:
+        return (
+            success_rank,
+            summary["steps"],
+            summary["final_distance"],
+            summary["high_outage_rate"],
+            summary["mean_outage"],
+        )
+    return (
+        success_rank,
+        summary["final_distance"],
+        summary["steps"],
+        summary["high_outage_rate"],
+        summary["mean_outage"],
+    )
+
+
+def risk_aware_key(summary: dict[str, float]) -> tuple[float, ...]:
+    return (
+        0.0 if summary["success"] > 0.5 else 1.0,
+        summary["high_outage_rate"],
+        summary["mean_outage"],
+        summary["final_distance"],
+        summary["steps"],
+    )
+
+
+def evaluate_models(
+    config: WWMNavConfig,
+    radio_map: RadioMap,
+    rssm_model,
+    actor,
+    device,
+    cache: PhysicalContextCache,
+    deterministic: bool = True,
+) -> dict[str, object]:
+    env = make_env(radio_map, np.asarray(config.goal_m, dtype=np.float64), config)
+    state = env.reset(start_m=np.asarray(config.start_m, dtype=np.float64))
+    obs = build_online_observation(env, state, None, 0.0, config)
+    latent_state = rssm_model.rssm.initial(1, device)
+    states = [state.copy()]
+    observations = [obs.copy()]
+    actions: list[int] = []
+    rewards: list[float] = []
+    outages: list[float] = []
+    terminals: list[bool] = []
+    done = False
+    with torch.inference_mode():
+        while not done:
+            action = choose_actor_action(
+                rssm_model,
+                actor,
+                env,
+                obs,
+                state,
+                latent_state,
+                device,
+                config,
+                cache,
+                deterministic=deterministic,
+            )
+            result = env.step_action(action)
+            next_obs = build_online_observation(
+                env,
+                result.state,
+                action,
+                env._step_count / max(config.max_steps, 1),
+                config,
+            )
+            latent_state = update_latent_with_feedback(
+                rssm_model,
+                latent_state,
+                radio_map,
+                action,
+                next_obs,
+                result.state,
+                device,
+                config,
+                cache,
+            )
+            state = result.state
+            obs = next_obs
+            states.append(state.copy())
+            observations.append(obs.copy())
+            actions.append(action)
+            rewards.append(result.reward)
+            outages.append(result.outage)
+            terminals.append(result.terminal)
+            done = result.done
+    return {
+        "states": np.asarray(states, dtype=np.float64),
+        "observations": np.asarray(observations, dtype=np.float32),
+        "actions": np.asarray(actions, dtype=np.int64),
+        "rewards": np.asarray(rewards, dtype=np.float64),
+        "outages": np.asarray(outages, dtype=np.float64),
+        "terminals": np.asarray(terminals, dtype=np.bool_),
+        "success": bool(result.terminal),
+        "steps": int(env._step_count),
+    }
+
+
+def _resume_config_payload(config: WWMNavConfig) -> dict[str, object]:
+    payload = serializable_config(config)
+    payload.pop("resume_checkpoint_path", None)
+    return payload
+
+
+def save_training_state(path: Path, state: dict[str, object]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    torch.save(state, temporary)
+    temporary.replace(path)
+
+
 def train(config: WWMNavConfig) -> dict[str, list[float]]:
+    validate_c28_5_config(config)
     rng = set_seed(config.seed)
     device = resolve_device(config.device)
     radio_map = RadioMap.from_npz(config.radiomap_path, require_physics=True)
     cache = PhysicalContextCache(radio_map, config)
-    replay = EpisodeSequenceReplay(config.replay_size)
     rssm_model, actor, critic, target_critic = initialize_models(radio_map, config, device)
-    rssm_optimizer = torch.optim.Adam(rssm_model.parameters(), lr=config.rssm_lr)
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_lr)
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=config.critic_lr)
-    return_norm = EMAScalarNormalizer(config.actor_return_norm_rate, config.actor_norm_min_scale).to(device)
-    advantage_norm = EMAScalarNormalizer(config.actor_advantage_norm_rate, config.actor_norm_min_scale).to(device)
-    history: dict[str, list[float]] = {key: [] for key in [
-        "episode_return", "episode_steps", "success", "mean_outage", "max_outage", "high_outage_count",
-        "wm_loss", "rssm_prior_outage_mae", "actor_loss", "critic_loss", "imagined_return_mean",
-    ]}
-    config.save_dir.mkdir(parents=True, exist_ok=True)
+    return_norm = EMAScalarNormalizer(
+        config.actor_return_norm_rate, config.actor_norm_min_scale
+    ).to(device)
+    advantage_norm = EMAScalarNormalizer(
+        config.actor_advantage_norm_rate, config.actor_norm_min_scale
+    ).to(device)
+    replay = EpisodeSequenceReplay(config.replay_size)
+    rssm_optimizer = torch.optim.Adam(rssm_model.parameters(), lr=config.rssm_lr)
+    history: dict[str, list[float]] = {
+        key: []
+        for key in [
+            "episode_return",
+            "episode_steps",
+            "success",
+            "mean_outage",
+            "max_outage",
+            "high_outage_count",
+            "high_outage_rate",
+            "wm_loss",
+            "rssm_prior_outage_mae",
+            "actor_loss",
+            "critic_loss",
+            "imagined_return_mean",
+        ]
+    }
+    evaluation_history: list[dict[str, float]] = []
+    training_tasks: list[tuple[int, float, float, float, float]] = []
+    trajectory_rows: list[list[float]] = []
+    episode_successes: list[float] = []
+    best_shortest_rollout: dict[str, object] | None = None
+    best_shortest_summary: dict[str, float] | None = None
+    best_shortest_rank: tuple[float, ...] | None = None
+    best_risk_rollout: dict[str, object] | None = None
+    best_risk_summary: dict[str, float] | None = None
+    best_risk_rank: tuple[float, ...] | None = None
+    actor_init_metrics = {
+        "actor_nav_prior_pretrain_loss": 0.0,
+        "actor_nav_prior_pretrain_match_rate": 0.0,
+    }
+    critic_init_metrics = {
+        "critic_nav_prior_init_loss": 0.0,
+        "critic_nav_prior_init_mae": 0.0,
+        "critic_nav_prior_init_target_mean": 0.0,
+    }
     global_step = 0
-    for episode in range(1, config.episodes + 1):
+    start_episode = 1
+
+    if config.resume_checkpoint_path is None:
+        actor_init_metrics = initialize_actor_snarm_style(
+            rssm_model,
+            actor,
+            actor_optimizer,
+            radio_map,
+            config,
+            rng,
+            device,
+            cache,
+        )
+        critic_init_metrics = initialize_critic_snarm_style(
+            rssm_model,
+            critic,
+            critic_optimizer,
+            radio_map,
+            config,
+            rng,
+            device,
+            cache,
+        )
+        target_critic.load_state_dict(critic.state_dict())
+    else:
+        state = torch.load(
+            config.resume_checkpoint_path, map_location=device, weights_only=False
+        )
+        if state.get("experiment_contract") != EXPERIMENT_CONTRACT:
+            raise ValueError("resume checkpoint is not a compatible C28.5 WWM-NAV state")
+        if state.get("config") != _resume_config_payload(config):
+            raise ValueError("resume checkpoint configuration does not match this run")
+        if state.get("radiomap_semantic_sha256") != semantic_npz_sha256(
+            config.radiomap_path
+        ):
+            raise ValueError("resume checkpoint radio-map identity mismatch")
+        rssm_model.load_state_dict(state["rssm_model"])
+        actor.load_state_dict(state["actor"])
+        critic.load_state_dict(state["critic"])
+        target_critic.load_state_dict(state["target_critic"])
+        rssm_optimizer.load_state_dict(state["rssm_optimizer"])
+        actor_optimizer.load_state_dict(state["actor_optimizer"])
+        critic_optimizer.load_state_dict(state["critic_optimizer"])
+        return_norm.load_state_dict(state["return_norm"])
+        advantage_norm.load_state_dict(state["advantage_norm"])
+        replay.load_state_dict(state["replay"])
+        history = state["history"]
+        evaluation_history = state["evaluation_history"]
+        training_tasks = state["training_tasks"]
+        trajectory_rows = state["trajectory_rows"]
+        episode_successes = state["episode_successes"]
+        best_shortest_rollout = state["best_shortest_rollout"]
+        best_shortest_summary = state["best_shortest_summary"]
+        best_shortest_rank = state["best_shortest_rank"]
+        best_risk_rollout = state["best_risk_rollout"]
+        best_risk_summary = state["best_risk_summary"]
+        best_risk_rank = state["best_risk_rank"]
+        actor_init_metrics = state["actor_init_metrics"]
+        critic_init_metrics = state["critic_init_metrics"]
+        global_step = int(state["global_step"])
+        start_episode = int(state["episode"]) + 1
+        rng.bit_generator.state = state["rng_state"]
+        random.setstate(state["python_random_state"])
+        np.random.set_state(state["numpy_random_state"])
+        torch.set_rng_state(state["torch_rng_state"])
+        if torch.cuda.is_available() and state["torch_cuda_rng_state_all"] is not None:
+            torch.cuda.set_rng_state_all(state["torch_cuda_rng_state_all"])
+
+    config.save_dir.mkdir(parents=True, exist_ok=True)
+    for episode in range(start_episode, config.episodes + 1):
         start_m, goal_m = sample_episode_task(radio_map, config, rng)
+        training_tasks.append(
+            (episode, float(start_m[0]), float(start_m[1]), float(goal_m[0]), float(goal_m[1]))
+        )
         env = make_env(radio_map, goal_m, config)
-        state = env.reset(start_m=start_m)
-        obs = build_online_observation(env, state, None, 0.0, config)
-        replay.start_episode(obs, state, goal_m)
+        state_xy = env.reset(start_m=start_m)
+        observation = build_online_observation(env, state_xy, None, 0.0, config)
+        replay.start_episode(observation, state_xy, goal_m)
         latent_state = rssm_model.rssm.initial(1, device)
+        episode_states = [state_xy.copy()]
         done = False
         episode_return = 0.0
         outages: list[float] = []
@@ -699,103 +1366,357 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
         critic_losses: list[float] = []
         imagined_returns: list[float] = []
         while not done:
-            action = choose_actor_action(rssm_model, actor, env, obs, state, latent_state, device, config, cache, deterministic=False)
+            action = choose_actor_action(
+                rssm_model,
+                actor,
+                env,
+                observation,
+                state_xy,
+                latent_state,
+                device,
+                config,
+                cache,
+                deterministic=False,
+            )
             result = env.step_action(action)
-            next_obs = build_online_observation(env, result.state, action, env._step_count / max(config.max_steps, 1), config)
-            latent_state = update_latent_with_feedback(rssm_model, latent_state, radio_map, action, next_obs, result.state, device, config, cache)
-            replay.append(action, result.reward, result.outage, next_obs, result.state, result.done)
+            next_observation = build_online_observation(
+                env,
+                result.state,
+                action,
+                env._step_count / max(config.max_steps, 1),
+                config,
+            )
+            latent_state = update_latent_with_feedback(
+                rssm_model,
+                latent_state,
+                radio_map,
+                action,
+                next_observation,
+                result.state,
+                device,
+                config,
+                cache,
+            )
+            replay.append(
+                action,
+                result.reward,
+                result.outage,
+                next_observation,
+                result.state,
+                result.done,
+            )
             for _ in range(config.rssm_updates_per_step):
-                metrics = update_rssm_network(rssm_model, rssm_optimizer, replay, radio_map, rng, config, device, cache)
+                metrics = update_rssm_network(
+                    rssm_model,
+                    rssm_optimizer,
+                    replay,
+                    radio_map,
+                    rng,
+                    config,
+                    device,
+                    cache,
+                )
                 if metrics:
                     rssm_losses.append(metrics["loss"])
                     prior_outage_maes.append(metrics["prior_outage_mae"])
-            if replay.can_sample(config.actor_batch_size, config.seq_len):
-                for _ in range(config.actor_updates_per_step):
-                    metrics = update_dreamer_v3_actor_critic(rssm_model, actor, critic, target_critic, return_norm, advantage_norm, actor_optimizer, critic_optimizer, replay, radio_map, rng, config, device, global_step, cache)
-                    if metrics:
-                        actor_losses.append(metrics["actor_loss"])
-                        critic_losses.append(metrics["critic_loss"])
-                        imagined_returns.append(metrics["imagined_return_mean"])
-            state = result.state
-            obs = next_obs
+            if global_step % LATENT_REFRESH_INTERVAL == 0:
+                latent_state, _ = current_episode_latent(
+                    rssm_model, replay, radio_map, device, config, cache
+                )
+            for _ in range(config.actor_updates_per_step):
+                metrics = update_dreamer_v3_actor_critic(
+                    rssm_model,
+                    actor,
+                    critic,
+                    target_critic,
+                    return_norm,
+                    advantage_norm,
+                    actor_optimizer,
+                    critic_optimizer,
+                    replay,
+                    radio_map,
+                    rng,
+                    config,
+                    device,
+                    global_step,
+                    cache,
+                )
+                if metrics:
+                    actor_losses.append(metrics["actor_loss"])
+                    critic_losses.append(metrics["critic_loss"])
+                    imagined_returns.append(metrics["imagined_return_mean"])
+            state_xy = result.state
+            episode_states.append(state_xy.copy())
+            observation = next_observation
             episode_return += result.reward
             outages.append(result.outage)
             done = result.done
             global_step += 1
+
         outage_array = np.asarray(outages, dtype=np.float64)
         history["episode_return"].append(float(episode_return))
         history["episode_steps"].append(float(env._step_count))
         history["success"].append(float(result.terminal))
-        history["mean_outage"].append(float(np.mean(outage_array)) if outage_array.size else 0.0)
-        history["max_outage"].append(float(np.max(outage_array)) if outage_array.size else 0.0)
-        history["high_outage_count"].append(float(np.count_nonzero(outage_array >= config.high_outage_threshold)))
-        history["wm_loss"].append(float(np.mean(rssm_losses)) if rssm_losses else float("nan"))
-        history["rssm_prior_outage_mae"].append(float(np.mean(prior_outage_maes)) if prior_outage_maes else float("nan"))
-        history["actor_loss"].append(float(np.mean(actor_losses)) if actor_losses else 0.0)
-        history["critic_loss"].append(float(np.mean(critic_losses)) if critic_losses else 0.0)
-        history["imagined_return_mean"].append(float(np.mean(imagined_returns)) if imagined_returns else 0.0)
-        if episode % max(int(config.eval_every_episodes), 1) == 0 or episode == config.episodes:
-            print(f"episode={episode} return={episode_return:.2f} steps={env._step_count} success={bool(result.terminal)} mean_outage={history['mean_outage'][-1]:.4f}")
-    save_training_artifacts(config, history, rssm_model, actor, critic)
+        history["mean_outage"].append(
+            float(np.mean(outage_array)) if outage_array.size else 0.0
+        )
+        history["max_outage"].append(
+            float(np.max(outage_array)) if outage_array.size else 0.0
+        )
+        history["high_outage_count"].append(
+            float(np.count_nonzero(outage_array >= config.high_outage_threshold))
+        )
+        history["high_outage_rate"].append(
+            float(history["high_outage_count"][-1] / len(outage_array))
+            if outage_array.size
+            else 0.0
+        )
+        history["wm_loss"].append(
+            float(np.mean(rssm_losses)) if rssm_losses else float("nan")
+        )
+        history["rssm_prior_outage_mae"].append(
+            float(np.mean(prior_outage_maes)) if prior_outage_maes else float("nan")
+        )
+        history["actor_loss"].append(
+            float(np.mean(actor_losses)) if actor_losses else 0.0
+        )
+        history["critic_loss"].append(
+            float(np.mean(critic_losses)) if critic_losses else 0.0
+        )
+        history["imagined_return_mean"].append(
+            float(np.mean(imagined_returns)) if imagined_returns else 0.0
+        )
+        trajectory_rows.extend(
+            [float(episode), float(step), float(xy[0]), float(xy[1])]
+            for step, xy in enumerate(episode_states)
+        )
+        episode_successes.append(float(result.terminal))
+
+        evaluated = (
+            episode % max(int(config.eval_every_episodes), 1) == 0
+            or episode == config.episodes
+        )
+        if evaluated:
+            rollout = evaluate_models(
+                config, radio_map, rssm_model, actor, device, cache, deterministic=True
+            )
+            summary = rollout_summary(
+                rollout, np.asarray(config.goal_m, dtype=np.float64), config.high_outage_threshold
+            )
+            evaluation_history.append({"episode": float(episode), **summary})
+            shortest_rank = shortest_success_key(summary)
+            risk_rank = risk_aware_key(summary)
+            if best_shortest_rank is None or shortest_rank < best_shortest_rank:
+                best_shortest_rank = shortest_rank
+                best_shortest_rollout = rollout
+                best_shortest_summary = summary
+            if best_risk_rank is None or risk_rank < best_risk_rank:
+                best_risk_rank = risk_rank
+                best_risk_rollout = rollout
+                best_risk_summary = summary
+            print(
+                f"episode={episode} return={episode_return:.2f} steps={env._step_count} "
+                f"success={bool(result.terminal)} mean_outage={history['mean_outage'][-1]:.4f} "
+                f"eval_success={bool(summary['success'])} eval_steps={int(summary['steps'])}"
+            )
+
+        checkpoint_due = (
+            config.checkpoint_every_episodes > 0
+            and (
+                episode % int(config.checkpoint_every_episodes) == 0
+                or episode == config.episodes
+            )
+        )
+        if checkpoint_due:
+            save_training_state(
+                config.save_dir / "training_state.pt",
+                {
+                    "experiment_contract": EXPERIMENT_CONTRACT,
+                    "episode": episode,
+                    "global_step": global_step,
+                    "config": _resume_config_payload(config),
+                    "radiomap_semantic_sha256": semantic_npz_sha256(
+                        config.radiomap_path
+                    ),
+                    "rssm_model": rssm_model.state_dict(),
+                    "actor": actor.state_dict(),
+                    "critic": critic.state_dict(),
+                    "target_critic": target_critic.state_dict(),
+                    "rssm_optimizer": rssm_optimizer.state_dict(),
+                    "actor_optimizer": actor_optimizer.state_dict(),
+                    "critic_optimizer": critic_optimizer.state_dict(),
+                    "return_norm": return_norm.state_dict(),
+                    "advantage_norm": advantage_norm.state_dict(),
+                    "replay": replay.state_dict(),
+                    "history": history,
+                    "evaluation_history": evaluation_history,
+                    "training_tasks": training_tasks,
+                    "trajectory_rows": trajectory_rows,
+                    "episode_successes": episode_successes,
+                    "best_shortest_rollout": best_shortest_rollout,
+                    "best_shortest_summary": best_shortest_summary,
+                    "best_shortest_rank": best_shortest_rank,
+                    "best_risk_rollout": best_risk_rollout,
+                    "best_risk_summary": best_risk_summary,
+                    "best_risk_rank": best_risk_rank,
+                    "actor_init_metrics": actor_init_metrics,
+                    "critic_init_metrics": critic_init_metrics,
+                    "rng_state": rng.bit_generator.state,
+                    "python_random_state": random.getstate(),
+                    "numpy_random_state": np.random.get_state(),
+                    "torch_rng_state": torch.get_rng_state(),
+                    "torch_cuda_rng_state_all": (
+                        torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+                    ),
+                },
+            )
+
+    save_training_artifacts(
+        config,
+        history,
+        evaluation_history,
+        training_tasks,
+        trajectory_rows,
+        episode_successes,
+        rssm_model,
+        actor,
+        critic,
+        actor_init_metrics,
+        critic_init_metrics,
+        best_shortest_rollout,
+        best_shortest_summary,
+        best_risk_rollout,
+        best_risk_summary,
+    )
     return history
 
 
-def save_training_artifacts(config: WWMNavConfig, history: dict[str, list[float]], rssm_model, actor, critic) -> None:
+def save_training_artifacts(
+    config: WWMNavConfig,
+    history: dict[str, list[float]],
+    evaluation_history: list[dict[str, float]],
+    training_tasks: list[tuple[int, float, float, float, float]],
+    trajectory_rows: list[list[float]],
+    episode_successes: list[float],
+    rssm_model,
+    actor,
+    critic,
+    actor_init_metrics: dict[str, float],
+    critic_init_metrics: dict[str, float],
+    best_shortest_rollout: dict[str, object] | None,
+    best_shortest_summary: dict[str, float] | None,
+    best_risk_rollout: dict[str, object] | None,
+    best_risk_summary: dict[str, float] | None,
+) -> None:
     config.save_dir.mkdir(parents=True, exist_ok=True)
-    (config.save_dir / "config.json").write_text(json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in asdict(config).items()}, indent=2))
-    with (config.save_dir / "history.csv").open("w", newline="") as handle:
+    (config.save_dir / "config.json").write_text(
+        json.dumps(serializable_config(config), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with (config.save_dir / "history.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         keys = list(history)
         writer.writerow(["episode", *keys])
         for index in range(len(next(iter(history.values()), []))):
             writer.writerow([index + 1, *[history[key][index] for key in keys]])
-    torch.save({
-        "rssm_model": rssm_model.state_dict(),
-        "actor": actor.state_dict(),
-        "critic": critic.state_dict(),
-        "config": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(config).items()},
-    }, config.save_dir / "checkpoint.pt")
+    with (config.save_dir / "training_tasks.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["episode", "start_x_m", "start_y_m", "goal_x_m", "goal_y_m"])
+        writer.writerows(training_tasks)
+    np.savez(
+        config.save_dir / "episode_trajectories.npz",
+        trajectory_points=np.asarray(trajectory_rows, dtype=np.float64),
+        episode_success=np.asarray(episode_successes, dtype=np.float64),
+        episode_start_m=np.asarray(
+            [task[1:3] for task in training_tasks], dtype=np.float64
+        ),
+        episode_goal_m=np.asarray(
+            [task[3:5] for task in training_tasks], dtype=np.float64
+        ),
+        episode_steps=np.asarray(history["episode_steps"], dtype=np.float64),
+        mean_outage=np.asarray(history["mean_outage"], dtype=np.float64),
+        max_outage=np.asarray(history["max_outage"], dtype=np.float64),
+        high_outage_count=np.asarray(history["high_outage_count"], dtype=np.float64),
+        high_outage_rate=np.asarray(history["high_outage_rate"], dtype=np.float64),
+    )
+    (config.save_dir / "evaluation_history.json").write_text(
+        json.dumps(evaluation_history, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    summaries = {
+        "best_shortest": best_shortest_summary,
+        "best_risk_aware": best_risk_summary,
+    }
+    (config.save_dir / "best_evaluation_summaries.json").write_text(
+        json.dumps(summaries, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    if best_shortest_rollout is not None:
+        np.savez(config.save_dir / "eval_rollout_best_shortest.npz", **best_shortest_rollout)
+    if best_risk_rollout is not None:
+        np.savez(config.save_dir / "eval_rollout_best_risk_aware.npz", **best_risk_rollout)
+    provenance = {
+        "experiment_contract": EXPERIMENT_CONTRACT,
+        "config_sha256": file_sha256(config.save_dir / "config.json"),
+        "radiomap": str(config.radiomap_path),
+        "radiomap_archive_sha256": file_sha256(config.radiomap_path),
+        "radiomap_semantic_sha256": semantic_npz_sha256(config.radiomap_path),
+        "training_tasks_sha256": file_sha256(config.save_dir / "training_tasks.csv"),
+        "episode_trajectories_sha256": file_sha256(
+            config.save_dir / "episode_trajectories.npz"
+        ),
+        "actor_navigation_prior_initialization": actor_init_metrics,
+        "critic_navigation_prior_initialization": critic_init_metrics,
+        **runtime_provenance(resolve_device(config.device)),
+        **source_code_provenance(),
+    }
+    (config.save_dir / "provenance.json").write_text(
+        json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    torch.save(
+        {
+            "experiment_contract": EXPERIMENT_CONTRACT,
+            "rssm_model": rssm_model.state_dict(),
+            "actor": actor.state_dict(),
+            "critic": critic.state_dict(),
+            "config": serializable_config(config),
+            "provenance": provenance,
+        },
+        config.save_dir / "checkpoint.pt",
+    )
 
 
-def evaluate(config: WWMNavConfig, checkpoint_path: Path | None = None, deterministic: bool = True) -> dict[str, object]:
+def evaluate(
+    config: WWMNavConfig,
+    checkpoint_path: Path | None = None,
+    deterministic: bool = True,
+) -> dict[str, object]:
+    validate_c28_5_config(config)
+    set_seed(config.seed)
     device = resolve_device(config.device)
     radio_map = RadioMap.from_npz(config.radiomap_path, require_physics=True)
     cache = PhysicalContextCache(radio_map, config)
-    rssm_model, actor, critic, target_critic = initialize_models(radio_map, config, device)
+    rssm_model, actor, _, _ = initialize_models(radio_map, config, device)
     path = checkpoint_path or (config.save_dir / "checkpoint.pt")
-    checkpoint = torch.load(path, map_location=device)
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    if checkpoint.get("experiment_contract") != EXPERIMENT_CONTRACT:
+        raise ValueError("checkpoint is not a compatible C28.5 WWM-NAV model")
+    checkpoint_map_identity = checkpoint.get("provenance", {}).get(
+        "radiomap_semantic_sha256"
+    )
+    if checkpoint_map_identity != semantic_npz_sha256(config.radiomap_path):
+        raise ValueError("checkpoint radio-map identity does not match the evaluation map")
     rssm_model.load_state_dict(checkpoint["rssm_model"])
     actor.load_state_dict(checkpoint["actor"])
-    env = make_env(radio_map, np.asarray(config.goal_m, dtype=np.float64), config)
-    state = env.reset(start_m=np.asarray(config.start_m, dtype=np.float64))
-    obs = build_online_observation(env, state, None, 0.0, config)
-    latent_state = rssm_model.rssm.initial(1, device)
-    states = [state.copy()]
-    actions = []
-    rewards = []
-    outages = []
-    done = False
-    with torch.inference_mode():
-        while not done:
-            action = choose_actor_action(rssm_model, actor, env, obs, state, latent_state, device, config, cache, deterministic=deterministic)
-            result = env.step_action(action)
-            next_obs = build_online_observation(env, result.state, action, env._step_count / max(config.max_steps, 1), config)
-            latent_state = update_latent_with_feedback(rssm_model, latent_state, radio_map, action, next_obs, result.state, device, config, cache)
-            state = result.state
-            obs = next_obs
-            states.append(state.copy())
-            actions.append(action)
-            rewards.append(result.reward)
-            outages.append(result.outage)
-            done = result.done
-    rollout = {
-        "states": np.asarray(states, dtype=np.float64),
-        "actions": np.asarray(actions, dtype=np.int64),
-        "rewards": np.asarray(rewards, dtype=np.float64),
-        "outages": np.asarray(outages, dtype=np.float64),
-        "success": bool(result.terminal),
-        "steps": int(env._step_count),
-    }
+    rollout = evaluate_models(
+        config, radio_map, rssm_model, actor, device, cache, deterministic=deterministic
+    )
     config.save_dir.mkdir(parents=True, exist_ok=True)
     np.savez(config.save_dir / "eval_rollout.npz", **rollout)
+    summary = rollout_summary(
+        rollout, np.asarray(config.goal_m, dtype=np.float64), config.high_outage_threshold
+    )
+    (config.save_dir / "eval_summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return rollout

@@ -14,7 +14,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot a WWM-NAV evaluation rollout.")
     parser.add_argument("--radiomap", type=Path, required=True)
     parser.add_argument("--rollout", type=Path, required=True)
-    parser.add_argument("--output", type=Path, default=Path("outputs/wwm_nav/eval_trajectory.png"))
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("outputs/c28_5_wwm_nav_seed1/eval_trajectory.png"),
+    )
     parser.add_argument("--start", nargs=2, type=float, default=(100.0, 100.0))
     parser.add_argument("--goal", nargs=2, type=float, default=(1400.0, 1600.0))
     return parser.parse_args()

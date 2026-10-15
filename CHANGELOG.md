@@ -4,3 +4,5 @@
 
 - Initial standalone WWM-NAV extraction.
 - Includes radio-map navigation environment, physics-conditioned RSSM, DreamerV3-style Actor-Critic, SNARM-style navigation prior, scripts, docs, and smoke-test scaffolding.
+- Adds the provenance-bound C28.5 map preparation flow, strict registered config,
+  periodic fixed-start evaluation, full resumable state, and runtime provenance.

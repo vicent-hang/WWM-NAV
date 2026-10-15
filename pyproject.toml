@@ -31,6 +31,9 @@ wwm-nav-train = "scripts.train_wwm_nav:main"
 wwm-nav-eval = "scripts.evaluate_wwm_nav:main"
 wwm-nav-plot = "scripts.plot_trajectory:main"
 wwm-nav-generate-map = "scripts.generate_sample_map:main"
+wwm-nav-generate-radio-env = "scripts.generate_radio_env:main"
+wwm-nav-prepare-c28-map = "scripts.prepare_c28_5_map:main"
+wwm-nav-verify-c28 = "scripts.verify_c28_5_setup:main"
 
 [tool.setuptools.packages.find]
 include = ["wwm_nav*", "scripts*"]

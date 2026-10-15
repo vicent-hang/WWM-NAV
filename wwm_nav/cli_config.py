@@ -10,9 +10,11 @@ from wwm_nav.agent import WWMNavConfig
 
 
 def _coerce_value(name: str, value: Any) -> Any:
-    if name in {"radiomap_path", "save_dir"}:
+    if name in {"radiomap_path", "save_dir", "resume_checkpoint_path"}:
+        if value is None:
+            return None
         return Path(value)
-    if name in {"start_m", "goal_m", "actor_hidden_dims"}:
+    if name in {"start_m", "goal_m", "actor_hidden_dims", "q_hidden_dims"}:
         return tuple(value)
     return value
 
@@ -26,6 +28,7 @@ def load_config_file(path: Path) -> dict[str, Any]:
         "radiomap": "radiomap_path",
         "start": "start_m",
         "goal": "goal_m",
+        "resume": "resume_checkpoint_path",
     }
     valid = {field.name for field in fields(WWMNavConfig)}
     result: dict[str, Any] = {}

@@ -13,7 +13,7 @@ The package intentionally contains only the navigation layer:
 - closed-loop RSSM imagination for Actor-Critic training;
 - optional SNARM-style distance-to-goal navigation prior.
 
-It does not include the communication/uplink controller layer, COMUDO power queues, continual-learning COLD-RSSM protocols, private experiment manifests, or historical checkpoint contracts.
+It does not include the communication/uplink controller layer, COMUDO power queues, or continual-learning COLD-RSSM protocols.
 
 ## Install
 
@@ -29,55 +29,74 @@ For development checks:
 pip install -e .[dev]
 ```
 
-## Quick Start
+## Reproduce C28.5
 
-Create a synthetic sample map:
+The repository includes the provenance-bound legacy C28.5 outage map. First
+verify it and reconstruct the deterministic physical metadata required by the
+physics-conditioned RSSM:
 
 ```bash
-python scripts/generate_sample_map.py --output data/sample_radiomap.npz
+python scripts/prepare_c28_5_map.py
+python scripts/verify_c28_5_setup.py --config configs/wwm_nav_default.yaml
 ```
 
-Train with command-line flags:
+Run the registered 1,500-episode, 300-step experiment:
+
+```bash
+python scripts/train_wwm_nav.py --config configs/wwm_nav_default.yaml
+```
+
+The YAML file is the standalone form of the original C28.5 command contract.
+Strict validation rejects accidental changes to effective research parameters.
+Training writes a resumable state every 20 episodes, fixed-start evaluation
+rollouts, resolved configuration, sampled training tasks, and map/code/runtime
+provenance.
+
+Resume an interrupted run without changing its output directory or config:
 
 ```bash
 python scripts/train_wwm_nav.py \
-  --radiomap data/sample_radiomap.npz \
-  --save-dir outputs/sample \
-  --device cuda
+  --config configs/wwm_nav_default.yaml \
+  --resume outputs/c28_5_wwm_nav_seed1/training_state.pt
 ```
-
-Unspecified training options use the canonical research-one contract in
-`WWMNavConfig`, including 1,500 episodes and 300 steps per episode.
-
-Or use the documented YAML contract:
-
-```bash
-python scripts/train_wwm_nav.py --config configs/wwm_nav_default.yaml --save-dir outputs/sample
-```
-
-For a CPU smoke run, set `--device cpu` and use fewer episodes.
 
 Evaluate a checkpoint:
 
 ```bash
 python scripts/evaluate_wwm_nav.py \
   --config configs/wwm_nav_default.yaml \
-  --save-dir outputs/sample \
-  --device cuda
+  --checkpoint outputs/c28_5_wwm_nav_seed1/checkpoint.pt
 ```
 
-This writes `outputs/sample/eval_rollout.npz`.
+This writes `outputs/c28_5_wwm_nav_seed1/eval_rollout.npz` and
+`eval_summary.json`.
 
 Plot the evaluation trajectory:
 
 ```bash
 python scripts/plot_trajectory.py \
-  --radiomap data/sample_radiomap.npz \
-  --rollout outputs/sample/eval_rollout.npz \
-  --output outputs/sample/eval_trajectory.png
+  --radiomap data/c28_5/radioenvir_c28_5.npz \
+  --rollout outputs/c28_5_wwm_nav_seed1/eval_rollout.npz \
+  --output outputs/c28_5_wwm_nav_seed1/eval_trajectory.png
 ```
 
-Console scripts are also registered after installation: `wwm-nav-train`, `wwm-nav-eval`, `wwm-nav-plot`, and `wwm-nav-generate-map`.
+See [run_commands.md](run_commands.md) for the complete setup, training,
+resume, evaluation, plotting, smoke, and test commands.
+
+## Smoke Check
+
+The synthetic map and smoke config verify interfaces only; they must not be
+used for research results:
+
+```bash
+python scripts/generate_sample_map.py --output data/sample_radiomap.npz
+python scripts/train_wwm_nav.py --config configs/smoke.yaml
+```
+
+Console scripts are also registered after installation: `wwm-nav-train`,
+`wwm-nav-eval`, `wwm-nav-plot`, `wwm-nav-generate-map`,
+`wwm-nav-generate-radio-env`, `wwm-nav-prepare-c28-map`, and
+`wwm-nav-verify-c28`.
 
 ## Repository Layout
 
@@ -86,6 +105,7 @@ wwm_nav/
   agent.py                 # WWM-NAV training/evaluation loop
   env.py                   # Grid UAV navigation environment
   radiomap.py              # Radio-map loader and physical context helpers
+  radio_env/               # C28.5 SNARM-style physical radio environment
   models/
     rssm.py                # RSSM world model
     dreamer_actor_critic.py
@@ -93,6 +113,7 @@ wwm_nav/
   tools/plotting.py
 scripts/                    # CLI entrypoints
 configs/                    # Reference YAML config
+data/c28_5/                 # Frozen legacy C28.5 map and preparation notes
 docs/                       # Method and data-format notes
 tests/                      # Lightweight tests
 ```
@@ -111,7 +132,13 @@ Training writes:
 
 - `config.json`: resolved run configuration;
 - `history.csv`: per-episode metrics;
-- `checkpoint.pt`: RSSM, Actor, and Critic weights.
+- `training_tasks.csv`: exact sampled start/goal sequence;
+- `episode_trajectories.npz`: every training trajectory and episode-level risk summary;
+- `evaluation_history.json`: fixed-start evaluation history;
+- `eval_rollout_best_shortest.npz` and `eval_rollout_best_risk_aware.npz`;
+- `training_state.pt`: full resumable state, including replay and RNG states;
+- `provenance.json`: map, task, source-tree, Python, NumPy, Torch, CUDA, and cuDNN identity;
+- `checkpoint.pt`: final RSSM, Actor, and Critic weights.
 
 Evaluation writes:
 
@@ -119,4 +146,4 @@ Evaluation writes:
 
 ## Evidence Boundary
 
-This repository packages the existing research-one navigation behavior as a standalone WWM-NAV codebase. It is meant for inspection, reproduction, and extension. Training quality depends on the radio map, seed, compute budget, and configured evaluation protocol.
+This repository packages the existing research-one navigation behavior as a standalone WWM-NAV codebase. The formal contract fixes source behavior, map contents, parameters, task RNG, and saved artifacts. Exact bitwise equality across different GPU architectures or Torch/CUDA/cuDNN versions is not guaranteed; `provenance.json` records that runtime boundary for each run.

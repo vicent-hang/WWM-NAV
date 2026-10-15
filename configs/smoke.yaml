@@ -1,0 +1,38 @@
+# Fast interface check only. This is not the C28.5 research experiment.
+method: WWM-NAV
+radiomap: data/sample_radiomap.npz
+save_dir: outputs/smoke
+start_m: [20.0, 20.0]
+goal_m: [180.0, 180.0]
+train_goal_mode: fixed
+min_initial_distance_m: 0.0
+seed: 1
+episodes: 2
+max_steps: 20
+replay_size: 1000
+seq_len: 4
+batch_size: 4
+actor_batch_size: 4
+rssm_updates_per_step: 1
+actor_updates_per_step: 1
+rssm_deter_dim: 32
+rssm_stoch_dim: 8
+rssm_hidden_dim: 32
+rssm_embed_dim: 16
+physical_num_bs: 4
+physical_context_embed_dim: 16
+building_patch_size: 5
+building_patch_embed_dim: 16
+actor_hidden_dims: [32, 32]
+q_hidden_dims: [32, 32]
+actor_imagine_horizon: 3
+actor_navigation_prior_pretrain_updates: 2
+actor_navigation_prior_pretrain_samples: 64
+actor_navigation_prior_pretrain_batch_size: 16
+actor_navigation_prior_critic_updates: 2
+actor_navigation_prior_critic_samples: 64
+actor_navigation_prior_critic_batch_size: 16
+eval_every_episodes: 1
+checkpoint_every_episodes: 1
+strict_c28_5_contract: false
+device: cpu

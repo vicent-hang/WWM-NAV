@@ -12,6 +12,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--radiomap", type=Path, default=None)
     parser.add_argument("--save-dir", type=Path, default=None)
+    parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--episodes", type=int, default=None)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--start", nargs=2, type=float, default=None)
@@ -23,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seq-len", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--actor-batch-size", type=int, default=None)
+    parser.add_argument("--checkpoint-every-episodes", type=int, default=None)
     return parser.parse_args()
 
 
@@ -32,6 +34,7 @@ def main() -> None:
     overrides = {
         "radiomap_path": args.radiomap,
         "save_dir": args.save_dir,
+        "resume_checkpoint_path": args.resume,
         "episodes": args.episodes,
         "max_steps": args.max_steps,
         "start_m": tuple(args.start) if args.start is not None else None,
@@ -43,6 +46,7 @@ def main() -> None:
         "seq_len": args.seq_len,
         "batch_size": args.batch_size,
         "actor_batch_size": args.actor_batch_size,
+        "checkpoint_every_episodes": args.checkpoint_every_episodes,
     }
     config_values = merge_config(config_values, overrides)
     if "radiomap_path" not in config_values:
