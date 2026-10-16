@@ -38,7 +38,7 @@ from wwm_nav.radiomap import RadioMap
 
 PREVIOUS_ACTION_OFFSET = 6
 METHOD_NAME = "WWM-NAV"
-EXPERIMENT_CONTRACT = "wwm_nav_reproduction_v1"
+EXPERIMENT_CONTRACT = "wwm_nav_train_then_final_eval_v1"
 LATENT_REFRESH_INTERVAL = 25
 
 
@@ -127,7 +127,6 @@ class WWMNavConfig:
     actor_navigation_prior_critic_batch_size: int = 256
     sample_rssm_state: bool = False
     mask_outbound_actions: bool = True
-    eval_every_episodes: int = 20
     checkpoint_every_episodes: int = 20
     strict_wwm_nav_contract: bool = True
     resume_checkpoint_path: Path | None = None
@@ -249,7 +248,6 @@ def validate_wwm_nav_config(config: WWMNavConfig) -> None:
         "building_patch_embed_dim": 64,
         "sample_rssm_state": False,
         "mask_outbound_actions": True,
-        "eval_every_episodes": 20,
         "checkpoint_every_episodes": 20,
         "strict_wwm_nav_contract": True,
         "device": "cuda",
@@ -1100,35 +1098,6 @@ def rollout_summary(
     }
 
 
-def shortest_success_key(summary: dict[str, float]) -> tuple[float, ...]:
-    success_rank = 0.0 if summary["success"] > 0.5 else 1.0
-    if summary["success"] > 0.5:
-        return (
-            success_rank,
-            summary["steps"],
-            summary["final_distance"],
-            summary["high_outage_rate"],
-            summary["mean_outage"],
-        )
-    return (
-        success_rank,
-        summary["final_distance"],
-        summary["steps"],
-        summary["high_outage_rate"],
-        summary["mean_outage"],
-    )
-
-
-def risk_aware_key(summary: dict[str, float]) -> tuple[float, ...]:
-    return (
-        0.0 if summary["success"] > 0.5 else 1.0,
-        summary["high_outage_rate"],
-        summary["mean_outage"],
-        summary["final_distance"],
-        summary["steps"],
-    )
-
-
 def evaluate_models(
     config: WWMNavConfig,
     radio_map: RadioMap,
@@ -1249,16 +1218,9 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
             "imagined_return_mean",
         ]
     }
-    evaluation_history: list[dict[str, float]] = []
     training_tasks: list[tuple[int, float, float, float, float]] = []
     trajectory_rows: list[list[float]] = []
     episode_successes: list[float] = []
-    best_shortest_rollout: dict[str, object] | None = None
-    best_shortest_summary: dict[str, float] | None = None
-    best_shortest_rank: tuple[float, ...] | None = None
-    best_risk_rollout: dict[str, object] | None = None
-    best_risk_summary: dict[str, float] | None = None
-    best_risk_rank: tuple[float, ...] | None = None
     actor_init_metrics = {
         "actor_nav_prior_pretrain_loss": 0.0,
         "actor_nav_prior_pretrain_match_rate": 0.0,
@@ -1316,16 +1278,9 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
         advantage_norm.load_state_dict(state["advantage_norm"])
         replay.load_state_dict(state["replay"])
         history = state["history"]
-        evaluation_history = state["evaluation_history"]
         training_tasks = state["training_tasks"]
         trajectory_rows = state["trajectory_rows"]
         episode_successes = state["episode_successes"]
-        best_shortest_rollout = state["best_shortest_rollout"]
-        best_shortest_summary = state["best_shortest_summary"]
-        best_shortest_rank = state["best_shortest_rank"]
-        best_risk_rollout = state["best_risk_rollout"]
-        best_risk_summary = state["best_risk_summary"]
-        best_risk_rank = state["best_risk_rank"]
         actor_init_metrics = state["actor_init_metrics"]
         critic_init_metrics = state["critic_init_metrics"]
         global_step = int(state["global_step"])
@@ -1484,34 +1439,6 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
         )
         episode_successes.append(float(result.terminal))
 
-        evaluated = (
-            episode % max(int(config.eval_every_episodes), 1) == 0
-            or episode == config.episodes
-        )
-        if evaluated:
-            rollout = evaluate_models(
-                config, radio_map, rssm_model, actor, device, cache, deterministic=True
-            )
-            summary = rollout_summary(
-                rollout, np.asarray(config.goal_m, dtype=np.float64), config.high_outage_threshold
-            )
-            evaluation_history.append({"episode": float(episode), **summary})
-            shortest_rank = shortest_success_key(summary)
-            risk_rank = risk_aware_key(summary)
-            if best_shortest_rank is None or shortest_rank < best_shortest_rank:
-                best_shortest_rank = shortest_rank
-                best_shortest_rollout = rollout
-                best_shortest_summary = summary
-            if best_risk_rank is None or risk_rank < best_risk_rank:
-                best_risk_rank = risk_rank
-                best_risk_rollout = rollout
-                best_risk_summary = summary
-            print(
-                f"episode={episode} return={episode_return:.2f} steps={env._step_count} "
-                f"success={bool(result.terminal)} mean_outage={history['mean_outage'][-1]:.4f} "
-                f"eval_success={bool(summary['success'])} eval_steps={int(summary['steps'])}"
-            )
-
         checkpoint_due = (
             config.checkpoint_every_episodes > 0
             and (
@@ -1541,16 +1468,9 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
                     "advantage_norm": advantage_norm.state_dict(),
                     "replay": replay.state_dict(),
                     "history": history,
-                    "evaluation_history": evaluation_history,
                     "training_tasks": training_tasks,
                     "trajectory_rows": trajectory_rows,
                     "episode_successes": episode_successes,
-                    "best_shortest_rollout": best_shortest_rollout,
-                    "best_shortest_summary": best_shortest_summary,
-                    "best_shortest_rank": best_shortest_rank,
-                    "best_risk_rollout": best_risk_rollout,
-                    "best_risk_summary": best_risk_summary,
-                    "best_risk_rank": best_risk_rank,
                     "actor_init_metrics": actor_init_metrics,
                     "critic_init_metrics": critic_init_metrics,
                     "rng_state": rng.bit_generator.state,
@@ -1566,7 +1486,6 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
     save_training_artifacts(
         config,
         history,
-        evaluation_history,
         training_tasks,
         trajectory_rows,
         episode_successes,
@@ -1575,10 +1494,6 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
         critic,
         actor_init_metrics,
         critic_init_metrics,
-        best_shortest_rollout,
-        best_shortest_summary,
-        best_risk_rollout,
-        best_risk_summary,
     )
     return history
 
@@ -1586,7 +1501,6 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
 def save_training_artifacts(
     config: WWMNavConfig,
     history: dict[str, list[float]],
-    evaluation_history: list[dict[str, float]],
     training_tasks: list[tuple[int, float, float, float, float]],
     trajectory_rows: list[list[float]],
     episode_successes: list[float],
@@ -1595,10 +1509,6 @@ def save_training_artifacts(
     critic,
     actor_init_metrics: dict[str, float],
     critic_init_metrics: dict[str, float],
-    best_shortest_rollout: dict[str, object] | None,
-    best_shortest_summary: dict[str, float] | None,
-    best_risk_rollout: dict[str, object] | None,
-    best_risk_summary: dict[str, float] | None,
 ) -> None:
     config.save_dir.mkdir(parents=True, exist_ok=True)
     (config.save_dir / "config.json").write_text(
@@ -1633,20 +1543,6 @@ def save_training_artifacts(
         high_outage_count=np.asarray(history["high_outage_count"], dtype=np.float64),
         high_outage_rate=np.asarray(history["high_outage_rate"], dtype=np.float64),
     )
-    (config.save_dir / "evaluation_history.json").write_text(
-        json.dumps(evaluation_history, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    summaries = {
-        "best_shortest": best_shortest_summary,
-        "best_risk_aware": best_risk_summary,
-    }
-    (config.save_dir / "best_evaluation_summaries.json").write_text(
-        json.dumps(summaries, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    if best_shortest_rollout is not None:
-        np.savez(config.save_dir / "eval_rollout_best_shortest.npz", **best_shortest_rollout)
-    if best_risk_rollout is not None:
-        np.savez(config.save_dir / "eval_rollout_best_risk_aware.npz", **best_risk_rollout)
     provenance = {
         "experiment_contract": EXPERIMENT_CONTRACT,
         "config_sha256": file_sha256(config.save_dir / "config.json"),

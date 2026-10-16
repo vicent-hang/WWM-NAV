@@ -28,6 +28,7 @@ dev = [
 [project.scripts]
 wwm-nav-train = "scripts.train_wwm_nav:main"
 wwm-nav-eval = "scripts.evaluate_wwm_nav:main"
+wwm-nav-eval-trials = "scripts.evaluate_wwm_nav_trials:main"
 wwm-nav-plot = "scripts.plot_trajectory:main"
 wwm-nav-generate-radio-env = "scripts.generate_radio_env:main"
 wwm-nav-verify = "scripts.verify_wwm_nav_setup:main"

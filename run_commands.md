@@ -53,10 +53,13 @@ python scripts/train_wwm_nav.py \
 ```
 
 Keep the same config, generated map, and output directory. The rolling state
-contains models, optimizers, normalizers, sequence replay, evaluation leaders,
-sampled tasks, and Python/NumPy/Torch/CUDA RNG states.
+contains models, optimizers, normalizers, sequence replay, sampled tasks, and
+Python/NumPy/Torch/CUDA RNG states.
 
 ## 5. Evaluate and plot the final checkpoint
+
+Training performs no evaluation or checkpoint selection. After all 1,500
+episodes finish, evaluate only the final `checkpoint.pt`:
 
 ```bash
 python scripts/evaluate_wwm_nav.py \
@@ -69,14 +72,11 @@ python scripts/plot_trajectory.py \
   --output outputs/wwm_nav_seed1/eval_trajectory.png
 ```
 
-Training itself evaluates the fixed start/goal every 20 episodes and retains
-both the shortest-success and risk-aware best rollouts.
-
 ## Reproducibility boundary
 
 The repository locks the algorithm path, effective WWM-NAV parameters, radio
-environment generation contract, physical context, task sampler, seed, periodic
-evaluation, and resumable RNG state. GPU kernels and dependency implementations
+environment generation contract, physical context, task sampler, seed, final
+checkpoint evaluation, and resumable RNG state. GPU kernels and dependency implementations
 can vary across Torch/CUDA/cuDNN and hardware versions, so exact cross-machine
 bitwise identity is not promised. Each formal run records those versions and
 the source-tree state in `provenance.json`.

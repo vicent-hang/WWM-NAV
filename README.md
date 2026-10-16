@@ -51,9 +51,8 @@ python scripts/train_wwm_nav.py --config configs/wwm_nav_default.yaml
 
 The YAML file is the standalone form of the original WWM-NAV command contract.
 Strict validation rejects accidental changes to effective research parameters.
-Training writes a resumable state every 20 episodes, fixed-start evaluation
-rollouts, resolved configuration, sampled training tasks, and map/code/runtime
-provenance.
+Training writes a resumable state every 20 episodes and saves the final model
+checkpoint after episode 1,500. It does not run evaluation during training.
 
 Resume an interrupted run without changing its output directory or config:
 
@@ -63,7 +62,7 @@ python scripts/train_wwm_nav.py \
   --resume outputs/wwm_nav_seed1/training_state.pt
 ```
 
-Evaluate a checkpoint:
+Evaluate the final checkpoint after training:
 
 ```bash
 python scripts/evaluate_wwm_nav.py \
@@ -73,6 +72,22 @@ python scripts/evaluate_wwm_nav.py \
 
 This writes `outputs/wwm_nav_seed1/eval_rollout.npz` and
 `eval_summary.json`.
+
+Evaluate the final checkpoint on the registered 100 shared random-start trials:
+
+```bash
+python scripts/evaluate_wwm_nav_trials.py \
+  --config configs/wwm_nav_default.yaml \
+  --checkpoint outputs/wwm_nav_seed1/checkpoint.pt \
+  --save-dir outputs/wwm_nav_seed1/shared_trials \
+  --num-trials 100 \
+  --seed 2026 \
+  --min-initial-distance 800 \
+  --plot-all
+```
+
+This writes the frozen `trial_pairs.csv`, per-trial `trial_metrics.csv` and
+`trial_metrics.npz`, one rollout archive per trial, and `summary.json`/`summary.md`.
 
 Plot the evaluation trajectory:
 
@@ -129,15 +144,16 @@ Training writes:
 - `history.csv`: per-episode metrics;
 - `training_tasks.csv`: exact sampled start/goal sequence;
 - `episode_trajectories.npz`: every training trajectory and episode-level risk summary;
-- `evaluation_history.json`: fixed-start evaluation history;
-- `eval_rollout_best_shortest.npz` and `eval_rollout_best_risk_aware.npz`;
 - `training_state.pt`: full resumable state, including replay and RNG states;
 - `provenance.json`: map, task, source-tree, Python, NumPy, Torch, CUDA, and cuDNN identity;
-- `checkpoint.pt`: final RSSM, Actor, and Critic weights.
+- `checkpoint.pt`: final RSSM, Actor, and Critic weights used for evaluation.
 
 Evaluation writes:
 
 - `eval_rollout.npz`: states, actions, rewards, outages, success flag, and step count.
+- `shared_trials/trial_pairs.csv`: frozen shared start/goal tasks;
+- `shared_trials/trial_metrics.csv` and `trial_metrics.npz`: per-trial metrics;
+- `shared_trials/summary.json` and `summary.md`: aggregate statistics.
 
 ## Evidence Boundary
 

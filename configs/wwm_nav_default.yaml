@@ -85,7 +85,6 @@ actor_navigation_prior_critic_samples: 100000
 actor_navigation_prior_critic_batch_size: 256
 sample_rssm_state: false
 mask_outbound_actions: true
-eval_every_episodes: 20
 checkpoint_every_episodes: 20
 strict_wwm_nav_contract: true
 resume_checkpoint_path: null
