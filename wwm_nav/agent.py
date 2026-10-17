@@ -7,6 +7,7 @@ import platform
 import random
 import subprocess
 import sys
+import time
 from argparse import Namespace
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -35,6 +36,11 @@ from wwm_nav.models.losses import rssm_loss
 from wwm_nav.models.q_network import DuelingQNetwork
 from wwm_nav.models.rssm import RSSMConfig, RSSMWorldModel
 from wwm_nav.radiomap import RadioMap
+from wwm_nav.tools.plotting import (
+    plot_wwm_nav_actor_critic_training,
+    plot_wwm_nav_training_history,
+    plot_wwm_nav_world_model_training,
+)
 
 PREVIOUS_ACTION_OFFSET = 6
 METHOD_NAME = "WWM-NAV"
@@ -60,6 +66,8 @@ class WWMNavConfig:
     rssm_updates_per_step: int = 1
     actor_updates_per_step: int = 1
     outage_penalty: float = 5.0
+    high_outage_penalty: float = 120.0
+    done_penalty: float = 20.0
     high_outage_reward_penalty: float = 0.0
     high_outage_threshold: float = 0.45
     terminal_reward: float = 200.0
@@ -181,6 +189,8 @@ def validate_wwm_nav_config(config: WWMNavConfig) -> None:
         "rssm_updates_per_step": 1,
         "actor_updates_per_step": 1,
         "outage_penalty": 5.0,
+        "high_outage_penalty": 120.0,
+        "done_penalty": 20.0,
         "high_outage_reward_penalty": 0.0,
         "high_outage_threshold": 0.45,
         "terminal_reward": 200.0,
@@ -533,7 +543,8 @@ def initialize_actor_snarm_style(
     losses: list[float] = []
     match_rates: list[float] = []
     actor.train()
-    for _ in range(int(config.actor_navigation_prior_pretrain_updates)):
+    total_updates = int(config.actor_navigation_prior_pretrain_updates)
+    for update_index in range(total_updates):
         indices = torch.randint(0, sample_count, (batch_size,), device=device)
         xy_m = states_t[indices]
         goal_m = goal_t.expand(batch_size, -1)
@@ -578,6 +589,12 @@ def initialize_actor_snarm_style(
             ).float().mean()
         losses.append(float(loss.detach().cpu()))
         match_rates.append(float(match_rate.detach().cpu()))
+        if (update_index + 1) % 500 == 0 or update_index + 1 == total_updates:
+            print(
+                "WWM-NAV actor-prior initialization: "
+                f"{update_index + 1}/{total_updates}",
+                flush=True,
+            )
     return {
         "actor_nav_prior_pretrain_loss": float(np.mean(losses)) if losses else 0.0,
         "actor_nav_prior_pretrain_match_rate": (
@@ -630,7 +647,8 @@ def initialize_critic_snarm_style(
     maes: list[float] = []
     target_means: list[float] = []
     critic.train()
-    for _ in range(int(config.actor_navigation_prior_critic_updates)):
+    total_updates = int(config.actor_navigation_prior_critic_updates)
+    for update_index in range(total_updates):
         indices = torch.randint(0, sample_count, (batch_size,), device=device)
         xy_m = states_t[indices]
         goal_m = goal_t.expand(batch_size, -1)
@@ -674,6 +692,12 @@ def initialize_critic_snarm_style(
         losses.append(float(loss.detach().cpu()))
         maes.append(float(mae.detach().cpu()))
         target_means.append(float(target.detach().mean().cpu()))
+        if (update_index + 1) % 500 == 0 or update_index + 1 == total_updates:
+            print(
+                "WWM-NAV critic-prior initialization: "
+                f"{update_index + 1}/{total_updates}",
+                flush=True,
+            )
     return {
         "critic_nav_prior_init_loss": float(np.mean(losses)) if losses else 0.0,
         "critic_nav_prior_init_mae": float(np.mean(maes)) if maes else 0.0,
@@ -854,6 +878,7 @@ def physics_dreamer_v3_imagine(rssm_model, actor, start_state, start_xy_m, goal_
             pred = rssm_model.heads_from_feat(rssm_model.rssm.get_feat(current), next_context)
             predicted_env_reward = pred["rewards"].detach()
             outage = pred["outages"].detach().clamp(0.0, 1.0)
+            high_outage_prob = torch.sigmoid(pred["high_outage_logits"]).detach()
             done_prob = torch.sigmoid(pred["done_logits"]).detach()
             step_scale = max(float(np.mean(radio_map.resolution_m)), 1.0)
             progress = torch.clamp(
@@ -866,7 +891,13 @@ def physics_dreamer_v3_imagine(rssm_model, actor, start_state, start_xy_m, goal_
             terminal_bonus = terminal.to(predicted_env_reward.dtype) * float(
                 config.actor_goal_terminal_bonus
             )
-            reward = predicted_env_reward + goal_progress_reward + terminal_bonus
+            reward = (
+                predicted_env_reward
+                - float(config.high_outage_penalty) * high_outage_prob
+                - float(config.done_penalty) * done_prob
+                + goal_progress_reward
+                + terminal_bonus
+            )
         features.append(actor_feat)
         actions.append(action)
         log_probs.append(dist.log_prob(action))
@@ -1186,6 +1217,12 @@ def save_training_state(path: Path, state: dict[str, object]) -> None:
 
 def train(config: WWMNavConfig) -> dict[str, list[float]]:
     validate_wwm_nav_config(config)
+    started_at = time.monotonic()
+    print(
+        f"WWM-NAV training started: episodes={config.episodes} "
+        f"max_steps={config.max_steps} device={config.device}",
+        flush=True,
+    )
     rng = set_seed(config.seed)
     device = resolve_device(config.device)
     radio_map = RadioMap.from_npz(config.radiomap_path, require_physics=True)
@@ -1216,6 +1253,7 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
             "actor_loss",
             "critic_loss",
             "imagined_return_mean",
+            "measured_cells",
         ]
     }
     training_tasks: list[tuple[int, float, float, float, float]] = []
@@ -1234,6 +1272,7 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
     start_episode = 1
 
     if config.resume_checkpoint_path is None:
+        print("WWM-NAV initializing navigation prior actor...", flush=True)
         actor_init_metrics = initialize_actor_snarm_style(
             rssm_model,
             actor,
@@ -1244,6 +1283,7 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
             device,
             cache,
         )
+        print("WWM-NAV initializing navigation prior critic...", flush=True)
         critic_init_metrics = initialize_critic_snarm_style(
             rssm_model,
             critic,
@@ -1255,7 +1295,12 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
             cache,
         )
         target_critic.load_state_dict(critic.state_dict())
+        print("WWM-NAV navigation prior initialization complete", flush=True)
     else:
+        print(
+            f"WWM-NAV resuming from {config.resume_checkpoint_path}",
+            flush=True,
+        )
         state = torch.load(
             config.resume_checkpoint_path, map_location=device, weights_only=False
         )
@@ -1278,6 +1323,7 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
         advantage_norm.load_state_dict(state["advantage_norm"])
         replay.load_state_dict(state["replay"])
         history = state["history"]
+        history.setdefault("measured_cells", [0.0] * len(history["episode_return"]))
         training_tasks = state["training_tasks"]
         trajectory_rows = state["trajectory_rows"]
         episode_successes = state["episode_successes"]
@@ -1433,11 +1479,23 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
         history["imagined_return_mean"].append(
             float(np.mean(imagined_returns)) if imagined_returns else 0.0
         )
+        history["measured_cells"].append(
+            float(len({(float(state[0]), float(state[1])) for state in episode_states}))
+        )
         trajectory_rows.extend(
             [float(episode), float(step), float(xy[0]), float(xy[1])]
             for step, xy in enumerate(episode_states)
         )
         episode_successes.append(float(result.terminal))
+
+        elapsed_min = (time.monotonic() - started_at) / 60.0
+        print(
+            f"WWM-NAV episode={episode}/{config.episodes} "
+            f"steps={int(env._step_count)} success={bool(result.terminal)} "
+            f"return={episode_return:.3f} mean_outage={history['mean_outage'][-1]:.4f} "
+            f"elapsed_min={elapsed_min:.1f}",
+            flush=True,
+        )
 
         checkpoint_due = (
             config.checkpoint_every_episodes > 0
@@ -1542,6 +1600,22 @@ def save_training_artifacts(
         max_outage=np.asarray(history["max_outage"], dtype=np.float64),
         high_outage_count=np.asarray(history["high_outage_count"], dtype=np.float64),
         high_outage_rate=np.asarray(history["high_outage_rate"], dtype=np.float64),
+        measured_cells=np.asarray(history.get("measured_cells", []), dtype=np.float64),
+    )
+    plot_wwm_nav_training_history(
+        history, config.save_dir / "wwm_nav_training.png"
+    )
+    plot_wwm_nav_world_model_training(
+        history, config.save_dir / "wwm_nav_world_model_training.png"
+    )
+    plot_wwm_nav_actor_critic_training(
+        history, config.save_dir / "wwm_nav_actor_critic_training.png"
+    )
+    print(
+        "WWM-NAV training plots saved: "
+        "wwm_nav_training.png, wwm_nav_world_model_training.png, "
+        "wwm_nav_actor_critic_training.png",
+        flush=True,
     )
     provenance = {
         "experiment_contract": EXPERIMENT_CONTRACT,

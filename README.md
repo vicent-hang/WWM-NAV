@@ -133,8 +133,8 @@ Values near 1 mean higher outage risk.
 ## Method Boundary
 
 The Actor objective uses the RSSM reward and done heads inside imagined
-rollouts. Outage prediction is supervised and logged, while risk primarily
-enters through the environment reward learned by the reward head.
+rollouts. Outage prediction is supervised and logged; imagined Actor-Critic
+rewards also apply the original high-outage and done-probability penalties.
 
 ## Main Outputs
 
@@ -144,6 +144,9 @@ Training writes:
 - `history.csv`: per-episode metrics;
 - `training_tasks.csv`: exact sampled start/goal sequence;
 - `episode_trajectories.npz`: every training trajectory and episode-level risk summary;
+- `wwm_nav_training.png`: online multi-step return, success, outage, steps, RSSM error, and coverage curves;
+- `wwm_nav_world_model_training.png`: RSSM loss and outage-prediction diagnostics;
+- `wwm_nav_actor_critic_training.png`: Actor-Critic loss and imagined-return diagnostics;
 - `training_state.pt`: full resumable state, including replay and RNG states;
 - `provenance.json`: map, task, source-tree, Python, NumPy, Torch, CUDA, and cuDNN identity;
 - `checkpoint.pt`: final RSSM, Actor, and Critic weights used for evaluation.
