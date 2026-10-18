@@ -122,7 +122,10 @@ def save_trial_pairs(path: Path, pairs: list[tuple[np.ndarray, np.ndarray]]) -> 
 
 def count_reverse_actions(actions: np.ndarray) -> int:
     opposite = {0: 2, 1: 3, 2: 0, 3: 1}
-    return sum(opposite.get(int(previous)) == int(current) for previous, current in zip(actions[:-1], actions[1:]))
+    return sum(
+        opposite.get(int(previous)) == int(current)
+        for previous, current in zip(actions[:-1], actions[1:], strict=True)
+    )
 
 
 def count_repeated_states(states: np.ndarray) -> int:
@@ -278,7 +281,7 @@ def write_outputs(save_dir: Path, pairs: list[tuple[np.ndarray, np.ndarray]], ro
     np.savez(save_dir / "trial_metrics.npz", **numeric)
     rollout_dir = save_dir / "rollouts"
     rollout_dir.mkdir(parents=True, exist_ok=True)
-    for row, rollout in zip(rows, rollouts):
+    for row, rollout in zip(rows, rollouts, strict=True):
         np.savez(
             rollout_dir / f"trial_{int(row['trial']):04d}.npz",
             **rollout,
@@ -297,13 +300,18 @@ def plot_all_trajectories(path: Path, radio_map: RadioMap, rows: list[dict[str, 
     fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
     mesh = ax.contourf(radio_map.x_m, radio_map.y_m, radio_map.coverage.T, levels=20, cmap="viridis")
     fig.colorbar(mesh, ax=ax, label="Coverage probability")
-    for row, rollout in zip(rows, rollouts):
+    for row, rollout in zip(rows, rollouts, strict=True):
         states = np.asarray(rollout["states"], dtype=np.float64)
         color = "white" if row["success"] else "red"
         ax.plot(states[:, 0], states[:, 1], color=color, alpha=0.7, linewidth=1.0)
     ax.set_title("WWM-NAV shared navigation trials")
-    ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)"); ax.set_aspect("equal", adjustable="box")
-    fig.tight_layout(); path.parent.mkdir(parents=True, exist_ok=True); fig.savefig(path); plt.close(fig)
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    ax.set_aspect("equal", adjustable="box")
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path)
+    plt.close(fig)
 
 
 def main() -> None:
@@ -322,8 +330,10 @@ def main() -> None:
     if checkpoint.get("provenance", {}).get("radiomap_semantic_sha256") != semantic_npz_sha256(config.radiomap_path):
         raise ValueError("checkpoint radio-map identity does not match the evaluation map")
     rssm_model, actor, _, _ = initialize_models(radio_map, config, device)
-    rssm_model.load_state_dict(checkpoint["rssm_model"]); actor.load_state_dict(checkpoint["actor"])
-    rssm_model.eval(); actor.eval()
+    rssm_model.load_state_dict(checkpoint["rssm_model"])
+    actor.load_state_dict(checkpoint["actor"])
+    rssm_model.eval()
+    actor.eval()
     pairs = read_trial_pairs(args.pairs_file, radio_map) if args.pairs_file else sample_random_start_fixed_goal_pairs(
         radio_map, args.num_trials, args.seed, np.asarray(args.goal if args.goal is not None else config.goal_m, dtype=np.float64),
         args.min_initial_distance, args.sample_margin, args.max_sample_attempts,
@@ -334,10 +344,12 @@ def main() -> None:
     threshold = float(args.high_outage_threshold if args.high_outage_threshold is not None else config.high_outage_threshold)
     trial_config = replace(config, max_steps=max_steps, high_outage_threshold=threshold)
     cache = PhysicalContextCache(radio_map, trial_config)
-    rows: list[dict[str, Any]] = []; rollouts: list[dict[str, object]] = []
+    rows: list[dict[str, Any]] = []
+    rollouts: list[dict[str, object]] = []
     for index, (start, goal) in enumerate(pairs):
         rollout = evaluate_models(replace(trial_config, start_m=tuple(start), goal_m=tuple(goal)), radio_map, rssm_model, actor, device, cache, deterministic=True)
-        rows.append(trial_metrics(rollout, index, start, goal, max_steps, threshold)); rollouts.append(rollout)
+        rows.append(trial_metrics(rollout, index, start, goal, max_steps, threshold))
+        rollouts.append(rollout)
     settings = {"method": "WWM-NAV", "checkpoint": str(checkpoint_path), "trial_mode": "random_starts_fixed_goal" if args.pairs_file is None else "pairs_file", "num_trials": len(rows), "seed": args.seed, "min_initial_distance": args.min_initial_distance, "sample_margin": args.sample_margin, "max_steps": max_steps, "high_outage_threshold": threshold}
     summary = summarize_trials(rows, settings)
     output_dir = args.save_dir or (config.save_dir / "shared_trials")

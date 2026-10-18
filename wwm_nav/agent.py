@@ -18,11 +18,6 @@ import torch
 from torch.nn import functional as F
 
 from wwm_nav.config import NavigationConfig
-from wwm_nav.wwm_nav_map import (
-    file_sha256,
-    semantic_npz_sha256,
-    validate_wwm_nav_generated_map,
-)
 from wwm_nav.env import ACTIONS, GridNavigationEnv
 from wwm_nav.models.dreamer_actor_critic import (
     DreamerCritic,
@@ -40,6 +35,11 @@ from wwm_nav.tools.plotting import (
     plot_wwm_nav_actor_critic_training,
     plot_wwm_nav_training_history,
     plot_wwm_nav_world_model_training,
+)
+from wwm_nav.wwm_nav_map import (
+    file_sha256,
+    semantic_npz_sha256,
+    validate_wwm_nav_generated_map,
 )
 
 PREVIOUS_ACTION_OFFSET = 6

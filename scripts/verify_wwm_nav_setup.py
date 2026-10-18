@@ -11,9 +11,9 @@ from wwm_nav.agent import (
     serializable_config,
     validate_wwm_nav_config,
 )
-from wwm_nav.wwm_nav_map import file_sha256, semantic_npz_sha256
 from wwm_nav.cli_config import load_config_file
 from wwm_nav.radiomap import RadioMap
+from wwm_nav.wwm_nav_map import file_sha256, semantic_npz_sha256
 
 
 def parse_args() -> argparse.Namespace:

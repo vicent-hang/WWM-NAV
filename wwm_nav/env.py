@@ -7,7 +7,6 @@ import numpy as np
 from wwm_nav.config import NavigationConfig
 from wwm_nav.radiomap import RadioMap
 
-
 ACTIONS = np.array(
     [
         [0, 1],

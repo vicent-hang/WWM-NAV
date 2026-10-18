@@ -168,5 +168,7 @@ def update_slow_target(source: nn.Module, target: nn.Module, fraction: float) ->
 
     mix = float(fraction)
     with torch.no_grad():
-        for source_param, target_param in zip(source.parameters(), target.parameters()):
+        for source_param, target_param in zip(
+            source.parameters(), target.parameters(), strict=True
+        ):
             target_param.data.mul_(1.0 - mix).add_(source_param.data, alpha=mix)

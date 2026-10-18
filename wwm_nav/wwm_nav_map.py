@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 
-
 WWM_NAV_MAP_CONTRACT = "wwm_nav_direct_generation_v1"
 WWM_NAV_GENERATION_SEED = 7
 WWM_NAV_FAST_FADING_SAMPLES = 1000

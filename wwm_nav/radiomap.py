@@ -31,7 +31,7 @@ class RadioMap:
     los_samples: int = 100
 
     @classmethod
-    def from_npz(cls, path: str | Path, coordinate_scale: float = 10.0, require_physics: bool = False) -> "RadioMap":
+    def from_npz(cls, path: str | Path, coordinate_scale: float = 10.0, require_physics: bool = False) -> RadioMap:
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(

@@ -5,7 +5,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-
 DEFAULT_BS_LOC_KM = (
     (1.0, 1.0, 0.025),
     (1.5774, 1.333, 0.025),
