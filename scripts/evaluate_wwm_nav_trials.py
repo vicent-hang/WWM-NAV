@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-dir", type=Path, default=None)
     parser.add_argument("--pairs-file", type=Path, default=None)
     parser.add_argument("--num-trials", type=int, default=100)
-    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--start", nargs=2, type=float, default=None)
     parser.add_argument("--goal", nargs=2, type=float, default=None)
     parser.add_argument("--min-initial-distance", type=float, default=800.0)
@@ -196,35 +196,75 @@ def summarize_trials(rows: list[dict[str, Any]], settings: dict[str, Any]) -> di
         "success_rate": float(len(successful) / max(len(rows), 1)),
         "mean_all_steps": _mean(rows, "steps"), "std_all_steps": _std(rows, "steps"),
         "mean_all_outage": _mean(rows, "mean_outage"), "std_all_outage": _std(rows, "mean_outage"),
-        "max_all_outage": max((float(row["mean_outage"]) for row in rows), default=None),
+        "max_all_outage": max((float(row["max_outage"]) for row in rows), default=None),
         "mean_all_max_outage": _mean(rows, "max_outage"),
-        "max_all_max_outage": max((float(row["max_outage"]) for row in rows), default=None),
         "mean_all_final_distance_m": _mean(rows, "final_distance_m"), "median_all_final_distance_m": _median(rows, "final_distance_m"),
         "mean_all_path_efficiency": _mean(rows, "path_efficiency"),
         "mean_high_outage_count": _mean(rows, "high_outage_count"), "mean_high_outage_rate": _mean(rows, "high_outage_rate"),
         "max_high_outage_count": max((int(row["high_outage_count"]) for row in rows), default=None),
         "mean_success_steps": _mean(successful, "steps"), "std_success_steps": _std(successful, "steps"),
         "mean_success_outage": _mean(successful, "mean_outage"), "std_success_outage": _std(successful, "mean_outage"),
+        "max_success_outage": max((float(row["max_outage"]) for row in successful), default=None),
         "mean_success_max_outage": _mean(successful, "max_outage"), "mean_success_cumulative_outage": _mean(successful, "cumulative_outage"),
         "mean_success_high_outage_count": _mean(successful, "high_outage_count"),
         "mean_success_high_outage_rate": _mean(successful, "high_outage_rate"),
         "mean_success_final_distance_m": _mean(successful, "final_distance_m"), "mean_success_path_length_m": _mean(successful, "path_length_m"),
         "mean_success_path_efficiency": _mean(successful, "path_efficiency"),
-        "mean_repeat_count": _mean(rows, "repeat_count"), "mean_reverse_count": _mean(rows, "reverse_count"),
+        "mean_success_repeat_count": _mean(successful, "repeat_count"),
+        "mean_success_reverse_count": _mean(successful, "reverse_count"),
+        "mean_repeat_count": _mean(rows, "repeat_count"),
+        "mean_repeat_state_rate": _mean(rows, "repeat_state_rate"),
+        "mean_reverse_count": _mean(rows, "reverse_count"),
+        "mean_reverse_rate": _mean(rows, "reverse_rate"),
         "failure_trials": [int(row["trial"]) for row in failed],
     }
 
 
 def write_summary_markdown(path: Path, summary: dict[str, Any]) -> None:
-    path.write_text(
-        "# WWM-NAV shared-trial evaluation\n\n"
-        f"- Trials: {summary['num_trials']}\n"
-        f"- Success rate: {summary['success_rate']:.4f}\n"
-        f"- Mean steps (all): {summary['mean_all_steps']}\n"
-        f"- Mean outage (all): {summary['mean_all_outage']}\n"
-        f"- Mean path efficiency (all): {summary['mean_all_path_efficiency']}\n",
-        encoding="utf-8",
+    metric_order = (
+        "num_trials",
+        "success_count",
+        "failure_count",
+        "success_rate",
+        "mean_success_steps",
+        "std_success_steps",
+        "mean_success_outage",
+        "std_success_outage",
+        "max_success_outage",
+        "mean_success_max_outage",
+        "mean_success_high_outage_count",
+        "mean_success_high_outage_rate",
+        "mean_success_cumulative_outage",
+        "mean_success_final_distance_m",
+        "mean_success_path_length_m",
+        "mean_success_path_efficiency",
+        "mean_success_repeat_count",
+        "mean_success_reverse_count",
+        "mean_all_steps",
+        "std_all_steps",
+        "mean_all_outage",
+        "std_all_outage",
+        "max_all_outage",
+        "mean_all_max_outage",
+        "mean_high_outage_count",
+        "mean_high_outage_rate",
+        "max_high_outage_count",
+        "mean_all_final_distance_m",
+        "median_all_final_distance_m",
+        "mean_all_path_efficiency",
+        "mean_repeat_count",
+        "mean_repeat_state_rate",
+        "mean_reverse_count",
+        "mean_reverse_rate",
+        "failure_trials",
     )
+    lines = ["# WWM-NAV shared-trial evaluation", "", "## Setting", ""]
+    for key, value in summary.get("setting", {}).items():
+        lines.append(f"- `{key}`: `{value}`")
+    lines.extend(("", "## Summary", ""))
+    for key in metric_order:
+        lines.append(f"- `{key}`: `{summary.get(key)}`")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def write_outputs(save_dir: Path, pairs: list[tuple[np.ndarray, np.ndarray]], rows: list[dict[str, Any]], rollouts: list[dict[str, object]], summary: dict[str, Any]) -> None:
@@ -236,8 +276,16 @@ def write_outputs(save_dir: Path, pairs: list[tuple[np.ndarray, np.ndarray]], ro
         writer.writerows(rows)
     numeric = {key: np.asarray([row[key] for row in rows]) for key, value in rows[0].items() if isinstance(value, (int, float, np.integer, np.floating))}
     np.savez(save_dir / "trial_metrics.npz", **numeric)
+    rollout_dir = save_dir / "rollouts"
+    rollout_dir.mkdir(parents=True, exist_ok=True)
     for row, rollout in zip(rows, rollouts):
-        np.savez(save_dir / f"trial_{int(row['trial']):04d}.npz", **rollout, trial=np.asarray([row["trial"]]), start_m=np.asarray([row["start_x"], row["start_y"]]), goal_m=np.asarray([row["goal_x"], row["goal_y"]]))
+        np.savez(
+            rollout_dir / f"trial_{int(row['trial']):04d}.npz",
+            **rollout,
+            trial_index=np.asarray([row["trial"]], dtype=np.int64),
+            start_m=np.asarray([row["start_x"], row["start_y"]], dtype=np.float64),
+            goal_m=np.asarray([row["goal_x"], row["goal_y"]], dtype=np.float64),
+        )
     (save_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     write_summary_markdown(save_dir / "summary.md", summary)
 
@@ -247,8 +295,8 @@ def plot_all_trajectories(path: Path, radio_map: RadioMap, rows: list[dict[str, 
     configure_matplotlib()
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
-    mesh = ax.contourf(radio_map.x_m, radio_map.y_m, radio_map.outage.T, levels=20, cmap="viridis")
-    fig.colorbar(mesh, ax=ax, label="Outage probability")
+    mesh = ax.contourf(radio_map.x_m, radio_map.y_m, radio_map.coverage.T, levels=20, cmap="viridis")
+    fig.colorbar(mesh, ax=ax, label="Coverage probability")
     for row, rollout in zip(rows, rollouts):
         states = np.asarray(rollout["states"], dtype=np.float64)
         color = "white" if row["success"] else "red"

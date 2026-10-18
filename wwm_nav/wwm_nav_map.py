@@ -24,20 +24,24 @@ WWM_NAV_BS_LOC_KM = np.asarray(
     dtype=np.float64,
 )
 WWM_NAV_SECTOR_BORESITE_DEG = np.asarray((-120.0, 0.0, 120.0), dtype=np.float64)
+WWM_NAV_LEGACY_ARRAY_CONTENT_SHA256 = {
+    "arr_0": "0516df8d33c1993744dc070c3626e7a6f55459aeb8faf772918a29962a1bf745",
+    "arr_1": "f43c1024ef5e1fe8e3240e73d0833880cdbdfbd39d8a689f04d4e76841c3e0da",
+    "arr_2": "f43c1024ef5e1fe8e3240e73d0833880cdbdfbd39d8a689f04d4e76841c3e0da",
+    "arr_3": "ed9233cbe0302db11c3186b2e56675a1120635a9d1698bf3b264ae4492d2f8c8",
+    "arr_4": "b2a6bf6e5a0376b71d29025a0cc989d594ca4228a1a17236e4aa45b91a091c4c",
+}
 WWM_NAV_MAP_FIELDS = {
     "arr_0",
     "arr_1",
     "arr_2",
     "arr_3",
     "arr_4",
-    "active_original_bs_ids",
     "best_bs",
-    "best_link_labels_valid",
     "best_sector",
     "bs_downtilt_deg",
     "bs_loc_km",
     "bs_power_watt",
-    "bs_power_watt_by_bs",
     "carrier_freq_ghz",
     "fast_fading_samples",
     "generation_seed",
@@ -73,6 +77,10 @@ def semantic_npz_sha256(path: Path) -> str:
             digest.update(b"\0")
             digest.update(value.tobytes(order="C"))
     return digest.hexdigest()
+
+
+def array_content_sha256(value: np.ndarray) -> str:
+    return hashlib.sha256(np.ascontiguousarray(value).tobytes(order="C")).hexdigest()
 
 
 def reconstruct_wwm_nav_height_map(seed: int = WWM_NAV_GENERATION_SEED) -> np.ndarray:
@@ -198,6 +206,14 @@ def validate_wwm_nav_generated_map(path: Path) -> None:
         if np.any((test_outages < 0.0) | (test_outages > 1.0)):
             raise ValueError("WWM-NAV test outage probabilities must be in [0, 1]")
 
+        for field, expected_hash in WWM_NAV_LEGACY_ARRAY_CONTENT_SHA256.items():
+            actual_hash = array_content_sha256(np.asarray(data[field]))
+            if actual_hash != expected_hash:
+                raise ValueError(
+                    f"WWM-NAV generated map does not reproduce the registered "
+                    f"research-one {field} contents"
+                )
+
         if not np.array_equal(np.asarray(data["bs_loc_km"]), WWM_NAV_BS_LOC_KM):
             raise ValueError("WWM-NAV base-station geometry mismatch")
         if not np.array_equal(
@@ -226,18 +242,7 @@ def validate_wwm_nav_generated_map(path: Path) -> None:
             "max_height_m": 90.0,
             "bs_downtilt_deg": 100.0,
             "carrier_freq_ghz": 2.0,
-            "best_link_labels_valid": 1,
         }
         for field, expected in expected_scalars.items():
             if _scalar(data, field) != expected:
                 raise ValueError(f"WWM-NAV generated-map field mismatch: {field}")
-        if not np.array_equal(
-            np.asarray(data["bs_power_watt_by_bs"]),
-            np.full(WWM_NAV_BS_LOC_KM.shape[0], 0.1, dtype=np.float64),
-        ):
-            raise ValueError("WWM-NAV per-BS power metadata mismatch")
-        if not np.array_equal(
-            np.asarray(data["active_original_bs_ids"]),
-            np.arange(WWM_NAV_BS_LOC_KM.shape[0], dtype=np.int64),
-        ):
-            raise ValueError("WWM-NAV active BS identity metadata mismatch")

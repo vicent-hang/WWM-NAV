@@ -43,6 +43,10 @@ python scripts/generate_radio_env.py \
 python scripts/verify_wwm_nav_setup.py --config configs/wwm_nav_default.yaml
 ```
 
+Verification also checks that the five generated core radio arrays reproduce
+the registered research-one map contents; the original generated output file
+does not need to be distributed.
+
 Run the registered 1,500-episode, 300-step experiment:
 
 ```bash
@@ -81,7 +85,7 @@ python scripts/evaluate_wwm_nav_trials.py \
   --checkpoint outputs/wwm_nav_seed1/checkpoint.pt \
   --save-dir outputs/wwm_nav_seed1/shared_trials \
   --num-trials 100 \
-  --seed 2026 \
+  --seed 123 \
   --min-initial-distance 800 \
   --plot-all
 ```
@@ -97,9 +101,6 @@ python scripts/plot_trajectory.py \
   --rollout outputs/wwm_nav_seed1/eval_rollout.npz \
   --output outputs/wwm_nav_seed1/eval_trajectory.png
 ```
-
-See [run_commands.md](run_commands.md) for the complete setup, map generation,
-training, resume, evaluation, and plotting commands.
 
 Console scripts are also registered after installation: `wwm-nav-train`,
 `wwm-nav-eval`, `wwm-nav-plot`, `wwm-nav-generate-radio-env`,

@@ -51,10 +51,6 @@ def main() -> None:
         bs_loc_km=radio_data.bs_loc_km,
         sector_boresite_deg=radio_data.sector_boresite_deg,
         bs_power_watt=np.asarray([radio_data.bs_power_watt], dtype=np.float64),
-        bs_power_watt_by_bs=np.full(
-            radio_data.bs_loc_km.shape[0], radio_data.bs_power_watt, dtype=np.float64
-        ),
-        active_original_bs_ids=np.arange(radio_data.bs_loc_km.shape[0], dtype=np.int64),
         height_map=radio_data.height_map,
         best_bs=radio_data.best_bs,
         best_sector=radio_data.best_sector,
@@ -66,7 +62,6 @@ def main() -> None:
         fast_fading_samples=np.asarray([config.fast_fading_samples], dtype=np.int64),
         generation_seed=np.asarray([int(args.seed)], dtype=np.int64),
         wwm_nav_map_contract=np.asarray(WWM_NAV_MAP_CONTRACT),
-        best_link_labels_valid=np.asarray([1], dtype=np.int8),
     )
     print(f"saved WWM-NAV radio environment: {args.output}")
     print(f"outage shape: {radio_data.outage.shape}")

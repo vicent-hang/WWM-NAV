@@ -886,7 +886,7 @@ def physics_dreamer_v3_imagine(rssm_model, actor, start_state, start_xy_m, goal_
             terminal_bonus = terminal.to(predicted_env_reward.dtype) * float(
                 config.actor_goal_terminal_bonus
             )
-            # The registered C28.5 DreamerV3 Actor path optimizes the RSSM
+            # The registered WWM-NAV DreamerV3 Actor path optimizes the RSSM
             # reward head directly; it has no additional high-outage penalty.
             reward = predicted_env_reward + goal_progress_reward + terminal_bonus
         features.append(actor_feat)

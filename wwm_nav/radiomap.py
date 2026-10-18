@@ -21,8 +21,6 @@ class RadioMap:
     bs_loc_km: np.ndarray | None = None
     sector_boresite_deg: np.ndarray | None = None
     bs_power_watt: float | None = None
-    bs_power_watt_by_bs: np.ndarray | None = None
-    active_original_bs_ids: np.ndarray | None = None
     height_map: np.ndarray | None = None
     best_bs: np.ndarray | None = None
     best_sector: np.ndarray | None = None
@@ -79,16 +77,6 @@ class RadioMap:
         best_bs = np.asarray(data["best_bs"], dtype=np.int64) if "best_bs" in fields else None
         best_sector = np.asarray(data["best_sector"], dtype=np.int64) if "best_sector" in fields else None
         bs_power_watt = float(np.asarray(data["bs_power_watt"]).reshape(-1)[0]) if "bs_power_watt" in fields else None
-        bs_power_watt_by_bs = (
-            np.asarray(data["bs_power_watt_by_bs"], dtype=np.float64)
-            if "bs_power_watt_by_bs" in fields
-            else None
-        )
-        active_original_bs_ids = (
-            np.asarray(data["active_original_bs_ids"], dtype=np.int64)
-            if "active_original_bs_ids" in fields
-            else None
-        )
         uav_height_km = (
             float(np.asarray(data["uav_height_km"]).reshape(-1)[0]) if "uav_height_km" in fields else 0.1
         )
@@ -114,28 +102,6 @@ class RadioMap:
             raise ValueError(f"best_bs shape {best_bs.shape} does not match outage shape {outage.shape}")
         if best_sector is not None and best_sector.shape != outage.shape:
             raise ValueError(f"best_sector shape {best_sector.shape} does not match outage shape {outage.shape}")
-        if bs_power_watt_by_bs is not None:
-            if bs_loc_km is None:
-                raise ValueError("bs_power_watt_by_bs requires bs_loc_km metadata")
-            if bs_power_watt_by_bs.shape != (bs_loc_km.shape[0],):
-                raise ValueError(
-                    "bs_power_watt_by_bs must contain one value per stored BS: "
-                    f"{bs_power_watt_by_bs.shape} vs {(bs_loc_km.shape[0],)}"
-                )
-            if (
-                not np.all(np.isfinite(bs_power_watt_by_bs))
-                or np.any(bs_power_watt_by_bs <= 0.0)
-            ):
-                raise ValueError("bs_power_watt_by_bs values must be finite and > 0")
-        if active_original_bs_ids is not None:
-            if bs_loc_km is None:
-                raise ValueError("active_original_bs_ids requires bs_loc_km metadata")
-            if active_original_bs_ids.shape != (bs_loc_km.shape[0],):
-                raise ValueError(
-                    "active_original_bs_ids must contain one id per stored BS: "
-                    f"{active_original_bs_ids.shape} vs {(bs_loc_km.shape[0],)}"
-                )
-
         return cls(
             outage=outage,
             x_m=x_m,
@@ -143,8 +109,6 @@ class RadioMap:
             bs_loc_km=bs_loc_km,
             sector_boresite_deg=sector_boresite_deg,
             bs_power_watt=bs_power_watt,
-            bs_power_watt_by_bs=bs_power_watt_by_bs,
-            active_original_bs_ids=active_original_bs_ids,
             height_map=height_map,
             best_bs=best_bs,
             best_sector=best_sector,
@@ -220,13 +184,6 @@ class RadioMap:
     def physical_context_dim(num_bs: int) -> int:
         return int(num_bs) * 11
 
-    def bs_power_for_index(self, bs_idx: int) -> float:
-        self.require_physics()
-        if self.bs_power_watt_by_bs is not None:
-            return float(self.bs_power_watt_by_bs[int(bs_idx)])
-        assert self.bs_power_watt is not None
-        return float(self.bs_power_watt)
-
     def building_patch_at_xy(
         self,
         xy_m: np.ndarray | list[float] | tuple[float, float],
@@ -265,10 +222,9 @@ class RadioMap:
         order = np.argsort(d2d)[: max(int(num_bs), 0)]
         rows = np.zeros((int(num_bs), 11), dtype=np.float32)
         uav_z_m = float(self.uav_height_km) * 1000.0
+        power_norm = np.log10(max(float(self.bs_power_watt or 1.0e-12), 1.0e-12)) / 2.0
         for slot, bs_idx in enumerate(order):
             bs = bs_m[int(bs_idx)]
-            bs_power_watt = self.bs_power_for_index(int(bs_idx))
-            power_norm = np.log10(max(bs_power_watt, 1.0e-12)) / 2.0
             dx = float(delta_xy[int(bs_idx), 0])
             dy = float(delta_xy[int(bs_idx), 1])
             dz = float(uav_z_m - bs[2])
