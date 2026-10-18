@@ -66,8 +66,6 @@ class WWMNavConfig:
     rssm_updates_per_step: int = 1
     actor_updates_per_step: int = 1
     outage_penalty: float = 5.0
-    high_outage_penalty: float = 120.0
-    done_penalty: float = 20.0
     high_outage_reward_penalty: float = 0.0
     high_outage_threshold: float = 0.45
     terminal_reward: float = 200.0
@@ -189,8 +187,6 @@ def validate_wwm_nav_config(config: WWMNavConfig) -> None:
         "rssm_updates_per_step": 1,
         "actor_updates_per_step": 1,
         "outage_penalty": 5.0,
-        "high_outage_penalty": 120.0,
-        "done_penalty": 20.0,
         "high_outage_reward_penalty": 0.0,
         "high_outage_threshold": 0.45,
         "terminal_reward": 200.0,
@@ -878,7 +874,6 @@ def physics_dreamer_v3_imagine(rssm_model, actor, start_state, start_xy_m, goal_
             pred = rssm_model.heads_from_feat(rssm_model.rssm.get_feat(current), next_context)
             predicted_env_reward = pred["rewards"].detach()
             outage = pred["outages"].detach().clamp(0.0, 1.0)
-            high_outage_prob = torch.sigmoid(pred["high_outage_logits"]).detach()
             done_prob = torch.sigmoid(pred["done_logits"]).detach()
             step_scale = max(float(np.mean(radio_map.resolution_m)), 1.0)
             progress = torch.clamp(
@@ -891,13 +886,9 @@ def physics_dreamer_v3_imagine(rssm_model, actor, start_state, start_xy_m, goal_
             terminal_bonus = terminal.to(predicted_env_reward.dtype) * float(
                 config.actor_goal_terminal_bonus
             )
-            reward = (
-                predicted_env_reward
-                - float(config.high_outage_penalty) * high_outage_prob
-                - float(config.done_penalty) * done_prob
-                + goal_progress_reward
-                + terminal_bonus
-            )
+            # The registered C28.5 DreamerV3 Actor path optimizes the RSSM
+            # reward head directly; it has no additional high-outage penalty.
+            reward = predicted_env_reward + goal_progress_reward + terminal_bonus
         features.append(actor_feat)
         actions.append(action)
         log_probs.append(dist.log_prob(action))

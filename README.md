@@ -133,8 +133,8 @@ Values near 1 mean higher outage risk.
 ## Method Boundary
 
 The Actor objective uses the RSSM reward and done heads inside imagined
-rollouts. Outage prediction is supervised and logged; imagined Actor-Critic
-rewards also apply the original high-outage and done-probability penalties.
+rollouts. Outage prediction is supervised and logged, while risk primarily
+enters through the environment reward learned by the reward head.
 
 ## Main Outputs
 
