@@ -54,6 +54,9 @@ class SnarmRadioMapData:
     bs_power_watt: float
     uav_height_km: float
     max_height_m: float
+    bs_downtilt_deg: float
+    carrier_freq_ghz: float
+    los_samples: int
 
 
 class SnarmLikeRadioEnvironment:
@@ -136,6 +139,9 @@ class SnarmLikeRadioEnvironment:
             bs_power_watt=float(self.config.bs_power_watt),
             uav_height_km=float(self.config.uav_height_km),
             max_height_m=float(self.config.max_height_m),
+            bs_downtilt_deg=float(self.config.bs_downtilt_deg),
+            carrier_freq_ghz=float(self.config.carrier_freq_ghz),
+            los_samples=int(self.config.los_samples),
         )
 
     def get_point_min_outage(self, loc_vec_km: np.ndarray) -> np.ndarray:
@@ -165,23 +171,15 @@ class SnarmLikeRadioEnvironment:
         return outage_matrix
 
     def get_received_power(self, point_loc_km: np.ndarray, bs_km: np.ndarray, los: bool) -> np.ndarray:
-        horizontal_distance = np.sqrt((bs_km[0] - point_loc_km[0]) ** 2 + (bs_km[1] - point_loc_km[1]) ** 2)
-        theta = np.arctan((bs_km[2] - point_loc_km[2]) / horizontal_distance)
-        theta_deg = np.rad2deg(theta) + 90.0
-        if (point_loc_km[1] == bs_km[1]) and (point_loc_km[0] == bs_km[0]):
-            phi = 0.0
-        else:
-            phi = np.arctan((point_loc_km[1] - bs_km[1]) / (point_loc_km[0] - bs_km[0] + 1e-5))
-        phi_deg = np.rad2deg(phi)
-        if (point_loc_km[1] > bs_km[1]) and (point_loc_km[0] < bs_km[0]):
-            phi_deg += 180.0
-        elif (point_loc_km[1] < bs_km[1]) and (point_loc_km[0] < bs_km[0]):
-            phi_deg -= 180.0
-
-        large_scale = self.get_large_scale_power(point_loc_km, bs_km, theta_deg, phi_deg, los)
+        large_scale = self.get_large_scale_received_power(point_loc_km, bs_km, los)
         rayleigh = np.sqrt(0.5) * (
-            self.rng.randn(self.config.fast_fading_samples, 3)
-            + 1j * self.rng.randn(self.config.fast_fading_samples, 3)
+            self.rng.randn(
+                self.config.fast_fading_samples, self.sector_boresite_deg.size
+            )
+            + 1j
+            * self.rng.randn(
+                self.config.fast_fading_samples, self.sector_boresite_deg.size
+            )
         )
 
         if los:
@@ -193,12 +191,39 @@ class SnarmLikeRadioEnvironment:
                 + (bs_km[2] - point_loc_km[2]) ** 2
             )
             deterministic = np.exp(-1j * 2.0 * np.pi * distance_m / self.wavelength_m)
-            fast_fading = np.sqrt(k_r / (k_r + 1.0)) * deterministic + np.sqrt(1.0 / (k_r + 1.0)) * rayleigh
+            fast_fading = np.sqrt(k_r / (k_r + 1.0)) * deterministic + np.sqrt(
+                1.0 / (k_r + 1.0)
+            ) * rayleigh
         else:
             fast_fading = rayleigh
 
-        h_overall = fast_fading * np.sqrt(np.tile(large_scale, (self.config.fast_fading_samples, 1)))
+        h_overall = fast_fading * np.sqrt(
+            np.tile(large_scale, (self.config.fast_fading_samples, 1))
+        )
         return np.abs(h_overall) ** 2
+
+    def get_large_scale_received_power(
+        self,
+        point_loc_km: np.ndarray,
+        bs_km: np.ndarray,
+        los: bool,
+    ) -> np.ndarray:
+        horizontal_distance = np.sqrt((bs_km[0] - point_loc_km[0]) ** 2 + (bs_km[1] - point_loc_km[1]) ** 2)
+        theta = np.arctan2(bs_km[2] - point_loc_km[2], horizontal_distance)
+        theta_deg = np.rad2deg(theta) + 90.0
+        if (point_loc_km[1] == bs_km[1]) and (point_loc_km[0] == bs_km[0]):
+            phi = 0.0
+        else:
+            phi = np.arctan((point_loc_km[1] - bs_km[1]) / (point_loc_km[0] - bs_km[0] + 1e-5))
+        phi_deg = np.rad2deg(phi)
+        if (point_loc_km[1] > bs_km[1]) and (point_loc_km[0] < bs_km[0]):
+            phi_deg += 180.0
+        elif (point_loc_km[1] < bs_km[1]) and (point_loc_km[0] < bs_km[0]):
+            phi_deg -= 180.0
+
+        return self.get_large_scale_power(
+            point_loc_km, bs_km, theta_deg, phi_deg, los
+        ).reshape(-1)
 
     def check_los(self, point_loc_km: np.ndarray, bs_km: np.ndarray) -> bool:
         sample_points = np.linspace(0.0, 1.0, self.config.los_samples)

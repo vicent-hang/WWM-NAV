@@ -44,8 +44,10 @@ from wwm_nav.wwm_nav_map import (
 
 PREVIOUS_ACTION_OFFSET = 6
 METHOD_NAME = "WWM-NAV"
-EXPERIMENT_CONTRACT = "wwm_nav_train_then_final_eval_v1"
+UPSTREAM_SOURCE_COMMIT = "c5ce274f8b210058d310c055f3e78a69e512377d"
+EXPERIMENT_CONTRACT = "wwm_nav_c5ce274_train_then_final_eval_v2"
 LATENT_REFRESH_INTERVAL = 25
+TRAIN_LOG_INTERVAL_EPISODES = 20
 
 
 @dataclass(frozen=True)
@@ -399,16 +401,21 @@ def build_online_observation(env: GridNavigationEnv, state_m: np.ndarray, previo
 
 
 class PhysicalContextCache:
+    _MAX_DEVICE_CACHE_BYTES = 512 * 1024 * 1024
+
     def __init__(self, radio_map: RadioMap, config: WWMNavConfig) -> None:
         self.radio_map = radio_map
         self.config = config
         self.context_cache: dict[tuple[int, int], np.ndarray] = {}
         self.patch_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._device_cache: dict[str, tuple[object, object]] = {}
+        self._device_axes: dict[str, tuple[object, object]] = {}
+        self._device_cache_disabled: set[str] = set()
 
     def arrays(self, states_xy_m: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         states = np.asarray(states_xy_m, dtype=np.float64)
         flat = states.reshape(-1, 2)
-        keys = [self.radio_map.nearest_index(xy) for xy in flat]
+        keys = [tuple(index) for index in self._nearest_indices(flat)]
         for key in dict.fromkeys(keys):
             if key not in self.context_cache:
                 xy = self.radio_map.index_to_xy(key)
@@ -422,15 +429,96 @@ class PhysicalContextCache:
             patches.reshape(*states.shape[:-1], 1, self.config.building_patch_size, self.config.building_patch_size),
         )
 
+    def _nearest_indices(self, flat_states_xy_m: np.ndarray) -> np.ndarray:
+        ix = self._nearest_axis_indices(self.radio_map.x_m, flat_states_xy_m[:, 0])
+        iy = self._nearest_axis_indices(self.radio_map.y_m, flat_states_xy_m[:, 1])
+        return np.stack((ix, iy), axis=1)
+
+    def tensors_for_xy(self, states_xy_m, device) -> tuple[object, object] | None:
+        """Gather the registered WWM-NAV grid context on the target device."""
+
+        device_key = str(torch.device(device))
+        if device_key in self._device_cache_disabled:
+            return None
+        context_dim = RadioMap.physical_context_dim(self.config.physical_num_bs)
+        nx = int(self.radio_map.x_m.size)
+        ny = int(self.radio_map.y_m.size)
+        estimated_bytes = nx * ny * (
+            4 * context_dim
+            + 4 * self.config.building_patch_size * self.config.building_patch_size
+        )
+        if estimated_bytes > self._MAX_DEVICE_CACHE_BYTES:
+            self._device_cache_disabled.add(device_key)
+            print(
+                "physical context device cache disabled: "
+                f"estimated_bytes={estimated_bytes} limit={self._MAX_DEVICE_CACHE_BYTES}",
+                flush=True,
+            )
+            return None
+        cached = self._device_cache.get(device_key)
+        if cached is None:
+            grid_x, grid_y = np.meshgrid(
+                self.radio_map.x_m,
+                self.radio_map.y_m,
+                indexing="ij",
+            )
+            grid_states = np.stack((grid_x, grid_y), axis=-1)
+            contexts, patches = self.arrays(grid_states)
+            cached = (
+                torch.as_tensor(contexts, dtype=torch.float32, device=device),
+                torch.as_tensor(patches, dtype=torch.float32, device=device),
+            )
+            self._device_cache[device_key] = cached
+        flat = states_xy_m.reshape(-1, 2).to(device=device, dtype=torch.float32)
+        if device_key not in self._device_axes:
+            self._device_axes[device_key] = (
+                torch.as_tensor(self.radio_map.x_m, dtype=torch.float64, device=device),
+                torch.as_tensor(self.radio_map.y_m, dtype=torch.float64, device=device),
+            )
+        x_axis, y_axis = self._device_axes[device_key]
+        ix = self._nearest_axis_indices_tensor(x_axis, flat[:, 0].double(), device)
+        iy = self._nearest_axis_indices_tensor(y_axis, flat[:, 1].double(), device)
+        leading_shape = tuple(states_xy_m.shape[:-1])
+        contexts = cached[0][ix, iy].reshape(*leading_shape, context_dim)
+        patches = cached[1][ix, iy].reshape(
+            *leading_shape,
+            1,
+            self.config.building_patch_size,
+            self.config.building_patch_size,
+        )
+        return contexts, patches
+
+    @staticmethod
+    def _nearest_axis_indices_tensor(axis, values, device):
+        axis_t = (
+            axis.to(device=device, dtype=values.dtype)
+            if torch.is_tensor(axis)
+            else torch.as_tensor(axis, dtype=values.dtype, device=device)
+        )
+        right = torch.searchsorted(axis_t, values, right=False)
+        right = torch.clamp(right, 0, axis_t.numel() - 1)
+        left = torch.clamp(right - 1, 0, axis_t.numel() - 1)
+        use_left = torch.abs(values - axis_t[left]) <= torch.abs(axis_t[right] - values)
+        return torch.where(use_left, left, right).long()
+
+    @staticmethod
+    def _nearest_axis_indices(axis: np.ndarray, values: np.ndarray) -> np.ndarray:
+        right = np.searchsorted(axis, values, side="left")
+        right = np.clip(right, 0, axis.size - 1)
+        left = np.clip(right - 1, 0, axis.size - 1)
+        use_left = np.abs(values - axis[left]) <= np.abs(axis[right] - values)
+        return np.where(use_left, left, right).astype(np.int64)
+
 
 def physical_context_tensors(radio_map: RadioMap, states_xy_m, config: WWMNavConfig, device, cache: PhysicalContextCache | None = None):
-    if torch.is_tensor(states_xy_m):
-        states_np = states_xy_m.detach().cpu().numpy()
-    else:
-        states_np = np.asarray(states_xy_m, dtype=np.float64)
+    if cache is not None and torch.is_tensor(states_xy_m):
+        cached = cache.tensors_for_xy(states_xy_m, device)
+        if cached is not None:
+            return cached
+        states_xy_m = states_xy_m.detach().cpu().numpy()
     if cache is None:
         cache = PhysicalContextCache(radio_map, config)
-    contexts, patches = cache.arrays(states_np)
+    contexts, patches = cache.arrays(np.asarray(states_xy_m, dtype=np.float64))
     return (
         torch.as_tensor(contexts, dtype=torch.float32, device=device),
         torch.as_tensor(patches, dtype=torch.float32, device=device),
@@ -721,13 +809,37 @@ def dreamer_actor_feature_dim(rssm_model: RSSMWorldModel, config: WWMNavConfig) 
     return int(rssm_model.feat_dim) + int(rssm_model.context_embed_dim) + nav_dim
 
 
-def dreamer_actor_features(rssm_model: RSSMWorldModel, radio_map: RadioMap, state: dict[str, object], xy_m, goal_m, previous_actions, step_fraction, device, config: WWMNavConfig, cache: PhysicalContextCache):
+def dreamer_actor_features(
+    rssm_model: RSSMWorldModel,
+    radio_map: RadioMap,
+    state: dict[str, object],
+    xy_m,
+    goal_m,
+    previous_actions,
+    step_fraction,
+    device,
+    config: WWMNavConfig,
+    cache: PhysicalContextCache,
+    context_embed=None,
+):
     with torch.no_grad():
-        physical_context, building_patch = physical_context_tensors(radio_map, xy_m, config, device, cache)
-        context_embed = rssm_model.encode_physical_contexts(physical_context, building_patch)
+        if context_embed is None:
+            physical_context, building_patch = physical_context_tensors(
+                radio_map, xy_m, config, device, cache
+            )
+            context_embed = rssm_model.encode_physical_contexts(
+                physical_context, building_patch
+            )
         rssm_feat = rssm_model.rssm.get_feat(state)
-    nav_feat = dreamer_navigation_features(radio_map, xy_m, goal_m, previous_actions, step_fraction, config)
-    return torch.cat([rssm_feat.detach(), context_embed.detach(), nav_feat.detach()], dim=-1), context_embed
+    nav_feat = dreamer_navigation_features(
+        radio_map, xy_m, goal_m, previous_actions, step_fraction, config
+    )
+    return (
+        torch.cat(
+            [rssm_feat.detach(), context_embed.detach(), nav_feat.detach()], dim=-1
+        ),
+        context_embed,
+    )
 
 
 def make_env(radio_map: RadioMap, goal_m: np.ndarray, config: WWMNavConfig) -> GridNavigationEnv:
@@ -740,6 +852,47 @@ def make_env(radio_map: RadioMap, goal_m: np.ndarray, config: WWMNavConfig) -> G
         max_steps=config.max_steps,
     )
     return GridNavigationEnv(radio_map=radio_map, goal_m=goal_m, config=nav_config)
+
+
+def reward_components_for_step(
+    env: GridNavigationEnv,
+    previous_state_m: np.ndarray,
+    result,
+) -> dict[str, float]:
+    """Reconstruct the registered environment reward for diagnostics."""
+
+    previous_distance = float(np.linalg.norm(previous_state_m - env.goal_m))
+    next_distance = float(np.linalg.norm(result.state - env.goal_m))
+    step_scale = max(float(np.mean(env.radio_map.resolution_m)), 1.0)
+    timeout = bool(
+        result.done
+        and not result.terminal
+        and not result.outbound
+        and env._step_count >= env.config.max_steps
+    )
+    return {
+        "reward_move_penalty_sum": -float(env.config.move_penalty),
+        "reward_outage_penalty_sum": (
+            -float(env.config.outage_penalty) * float(result.outage)
+        ),
+        "reward_high_outage_penalty_sum": (
+            -float(env.config.high_outage_reward_penalty)
+            if float(result.outage) >= float(env.config.high_outage_threshold)
+            else 0.0
+        ),
+        "reward_progress_sum": (
+            float(env.config.distance_shaping_weight)
+            * (previous_distance - next_distance)
+            / step_scale
+        ),
+        "reward_terminal_sum": (
+            float(env.config.terminal_reward) if result.terminal else 0.0
+        ),
+        "reward_out_of_bounds_penalty_sum": (
+            -float(env.config.out_of_bounds_penalty) if result.outbound else 0.0
+        ),
+        "timeout_count": float(timeout),
+    }
 
 
 def sample_episode_task(radio_map: RadioMap, config: WWMNavConfig, rng: np.random.Generator):
@@ -841,6 +994,7 @@ def physics_dreamer_v3_imagine(rssm_model, actor, start_state, start_xy_m, goal_
     goal_m = goal_xy_m.float()
     prev_action = previous_actions.long()
     step_frac = step_fraction.float()
+    current_context = None
     features = []
     actions = []
     log_probs = []
@@ -857,7 +1011,19 @@ def physics_dreamer_v3_imagine(rssm_model, actor, start_state, start_xy_m, goal_
         "total_reward": [],
     }
     for _ in range(horizon):
-        actor_feat, _ = dreamer_actor_features(rssm_model, radio_map, current, xy_m, goal_m, prev_action, step_frac, device, config, cache)
+        actor_feat, current_context = dreamer_actor_features(
+            rssm_model,
+            radio_map,
+            current,
+            xy_m,
+            goal_m,
+            prev_action,
+            step_frac,
+            device,
+            config,
+            cache,
+            context_embed=current_context,
+        )
         valid_mask = valid_action_mask_for_xy(radio_map, xy_m, device) if config.mask_outbound_actions else torch.ones(actor_feat.shape[0], config.action_dim, dtype=torch.bool, device=device)
         dist = actor.distribution(actor_feat, valid_mask=valid_mask)
         action = dist.sample() if torch_generator is None else torch.multinomial(dist.probs, num_samples=1, generator=torch_generator).squeeze(-1)
@@ -905,7 +1071,20 @@ def physics_dreamer_v3_imagine(rssm_model, actor, start_state, start_xy_m, goal_
         xy_m = next_xy.detach()
         prev_action = action.detach()
         step_frac = next_step_frac
-    final_feat, _ = dreamer_actor_features(rssm_model, radio_map, current, xy_m, goal_m, prev_action, step_frac, device, config, cache)
+        current_context = next_context
+    final_feat, _ = dreamer_actor_features(
+        rssm_model,
+        radio_map,
+        current,
+        xy_m,
+        goal_m,
+        prev_action,
+        step_frac,
+        device,
+        config,
+        cache,
+        context_embed=current_context,
+    )
     done_tensor = torch.stack(done_probs, dim=0)
     discounts = float(config.gamma) * (1.0 - done_tensor)
     weights = torch.cumprod(torch.cat([torch.ones_like(discounts[:1]), discounts[:-1]], dim=0), dim=0).detach()
@@ -945,6 +1124,7 @@ def dreamer_v3_actor_critic_losses(imagination, critic, target_critic, return_no
         bootstrap = target_critic(imagination.features[-1])
         returns = lambda_return(rewards, target_values, discounts, bootstrap, config.actor_lambda)
         return_norm.update(returns)
+        advantages = returns - target_values
         scaled_advantages = return_norm.normalize(returns) - return_norm.normalize(target_values)
         advantage_norm.update(scaled_advantages)
         actor_advantages = advantage_norm.normalize(scaled_advantages)
@@ -962,7 +1142,7 @@ def dreamer_v3_actor_critic_losses(imagination, critic, target_critic, return_no
         actor_loss = actor_loss + float(nav_prior_weight) * nav_prior_loss
         nav_prior_match_rate = float((torch.argmax(actor_probs.detach(), dim=-1) == torch.argmax(prior_probs, dim=-1)).float().mean().detach().cpu())
     critic_loss = (weights * F.mse_loss(values, returns.detach(), reduction="none")).mean()
-    return actor_loss, critic_loss, {
+    metrics = {
         "actor_loss": float(actor_loss.detach().cpu()),
         "actor_base_loss": float(actor_base_loss.detach().cpu()),
         "actor_nav_prior_loss": float(nav_prior_loss.detach().cpu()),
@@ -971,8 +1151,17 @@ def dreamer_v3_actor_critic_losses(imagination, critic, target_critic, return_no
         "critic_loss": float(critic_loss.detach().cpu()),
         "imagined_return_mean": float(returns.detach().mean().cpu()),
         "imagined_reward_mean": float(rewards.detach().mean().cpu()),
+        "imagined_discount_mean": float(discounts.detach().mean().cpu()),
         "actor_entropy": float(imagination.entropies.detach().mean().cpu()),
+        "critic_value_mean": float(values.detach().mean().cpu()),
+        "actor_advantage_mean": float(advantages.detach().mean().cpu()),
+        "actor_return_norm_scale": float(return_norm.scale.detach().cpu()),
+        "actor_advantage_norm_scale": float(advantage_norm.scale.detach().cpu()),
     }
+    if imagination.reward_components is not None:
+        for key, value in imagination.reward_components.items():
+            metrics[f"imagined_{key}_mean"] = float(value.detach().mean().cpu())
+    return actor_loss, critic_loss, metrics
 
 
 def update_dreamer_v3_actor_critic(rssm_model, actor, critic, target_critic, return_norm, advantage_norm, actor_optimizer, critic_optimizer, replay, radio_map, rng, config, device, global_step, cache):
@@ -1239,17 +1428,44 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
             "max_outage",
             "high_outage_count",
             "high_outage_rate",
+            "reward_move_penalty_sum",
+            "reward_outage_penalty_sum",
+            "reward_high_outage_penalty_sum",
+            "reward_progress_sum",
+            "reward_terminal_sum",
+            "reward_out_of_bounds_penalty_sum",
+            "timeout_count",
+            "reward_component_residual_abs_max",
             "wm_loss",
             "rssm_prior_outage_mae",
+            "rssm_ready_rate",
             "actor_loss",
+            "actor_base_loss",
+            "actor_nav_prior_loss",
+            "actor_nav_prior_weight",
+            "actor_nav_prior_match_rate",
+            "actor_nav_prior_pretrain_loss",
+            "actor_nav_prior_pretrain_match_rate",
+            "critic_nav_prior_init_loss",
+            "critic_nav_prior_init_mae",
+            "critic_nav_prior_init_target_mean",
             "critic_loss",
+            "actor_entropy",
             "imagined_return_mean",
+            "imagined_reward_mean",
+            "imagined_predicted_env_reward_mean",
+            "imagined_goal_progress_reward_mean",
+            "imagined_terminal_bonus_mean",
+            "imagined_total_reward_mean",
+            "actor_ready_rate",
+            "measured_points",
             "measured_cells",
         ]
     }
     training_tasks: list[tuple[int, float, float, float, float]] = []
     trajectory_rows: list[list[float]] = []
     episode_successes: list[float] = []
+    measured_cells: set[tuple[float, float]] = set()
     actor_init_metrics = {
         "actor_nav_prior_pretrain_loss": 0.0,
         "actor_nav_prior_pretrain_match_rate": 0.0,
@@ -1274,6 +1490,12 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
             device,
             cache,
         )
+        print(
+            "WWM-NAV actor navigation-prior initialization: "
+            f"loss={actor_init_metrics['actor_nav_prior_pretrain_loss']:.6f} "
+            f"match={actor_init_metrics['actor_nav_prior_pretrain_match_rate']:.3f}",
+            flush=True,
+        )
         print("WWM-NAV initializing navigation prior critic...", flush=True)
         critic_init_metrics = initialize_critic_snarm_style(
             rssm_model,
@@ -1286,6 +1508,13 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
             cache,
         )
         target_critic.load_state_dict(critic.state_dict())
+        print(
+            "WWM-NAV critic navigation-prior initialization: "
+            f"loss={critic_init_metrics['critic_nav_prior_init_loss']:.6f} "
+            f"mae={critic_init_metrics['critic_nav_prior_init_mae']:.6f} "
+            f"target_mean={critic_init_metrics['critic_nav_prior_init_target_mean']:.3f}",
+            flush=True,
+        )
         print("WWM-NAV navigation prior initialization complete", flush=True)
     else:
         print(
@@ -1318,6 +1547,7 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
         training_tasks = state["training_tasks"]
         trajectory_rows = state["trajectory_rows"]
         episode_successes = state["episode_successes"]
+        measured_cells = set(state["measured_cells"])
         actor_init_metrics = state["actor_init_metrics"]
         critic_init_metrics = state["critic_init_metrics"]
         global_step = int(state["global_step"])
@@ -1349,6 +1579,31 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
         actor_losses: list[float] = []
         critic_losses: list[float] = []
         imagined_returns: list[float] = []
+        actor_base_losses: list[float] = []
+        actor_nav_prior_losses: list[float] = []
+        actor_nav_prior_weights: list[float] = []
+        actor_nav_prior_match_rates: list[float] = []
+        actor_entropies: list[float] = []
+        imagined_rewards: list[float] = []
+        imagined_reward_components: dict[str, list[float]] = {
+            "imagined_predicted_env_reward_mean": [],
+            "imagined_goal_progress_reward_mean": [],
+            "imagined_terminal_bonus_mean": [],
+            "imagined_total_reward_mean": [],
+        }
+        reward_component_sums = {
+            key: 0.0
+            for key in (
+                "reward_move_penalty_sum",
+                "reward_outage_penalty_sum",
+                "reward_high_outage_penalty_sum",
+                "reward_progress_sum",
+                "reward_terminal_sum",
+                "reward_out_of_bounds_penalty_sum",
+            )
+        }
+        timeout_count = 0.0
+        reward_component_residuals: list[float] = []
         while not done:
             action = choose_actor_action(
                 rssm_model,
@@ -1363,6 +1618,17 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
                 deterministic=False,
             )
             result = env.step_action(action)
+            reward_components = reward_components_for_step(env, state_xy, result)
+            for key in reward_component_sums:
+                reward_component_sums[key] += reward_components[key]
+            timeout_count += reward_components["timeout_count"]
+            reconstructed_reward = sum(
+                reward_components[key] for key in reward_component_sums
+            )
+            reward_component_residuals.append(
+                abs(float(result.reward) - reconstructed_reward)
+            )
+            measured_cells.add((float(result.state[0]), float(result.state[1])))
             next_observation = build_online_observation(
                 env,
                 result.state,
@@ -1389,46 +1655,60 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
                 result.state,
                 result.done,
             )
-            for _ in range(config.rssm_updates_per_step):
-                metrics = update_rssm_network(
-                    rssm_model,
-                    rssm_optimizer,
-                    replay,
-                    radio_map,
-                    rng,
-                    config,
-                    device,
-                    cache,
-                )
-                if metrics:
+            if replay.can_sample(config.batch_size, config.seq_len):
+                for _ in range(config.rssm_updates_per_step):
+                    metrics = update_rssm_network(
+                        rssm_model,
+                        rssm_optimizer,
+                        replay,
+                        radio_map,
+                        rng,
+                        config,
+                        device,
+                        cache,
+                    )
                     rssm_losses.append(metrics["loss"])
                     prior_outage_maes.append(metrics["prior_outage_mae"])
-            if global_step % LATENT_REFRESH_INTERVAL == 0:
-                latent_state, _ = current_episode_latent(
-                    rssm_model, replay, radio_map, device, config, cache
-                )
-            for _ in range(config.actor_updates_per_step):
-                metrics = update_dreamer_v3_actor_critic(
-                    rssm_model,
-                    actor,
-                    critic,
-                    target_critic,
-                    return_norm,
-                    advantage_norm,
-                    actor_optimizer,
-                    critic_optimizer,
-                    replay,
-                    radio_map,
-                    rng,
-                    config,
-                    device,
-                    global_step,
-                    cache,
-                )
-                if metrics:
-                    actor_losses.append(metrics["actor_loss"])
-                    critic_losses.append(metrics["critic_loss"])
-                    imagined_returns.append(metrics["imagined_return_mean"])
+                if global_step % LATENT_REFRESH_INTERVAL == 0:
+                    latent_state, _ = current_episode_latent(
+                        rssm_model, replay, radio_map, device, config, cache
+                    )
+                for _ in range(config.actor_updates_per_step):
+                    metrics = update_dreamer_v3_actor_critic(
+                        rssm_model,
+                        actor,
+                        critic,
+                        target_critic,
+                        return_norm,
+                        advantage_norm,
+                        actor_optimizer,
+                        critic_optimizer,
+                        replay,
+                        radio_map,
+                        rng,
+                        config,
+                        device,
+                        global_step,
+                        cache,
+                    )
+                    if metrics:
+                        actor_losses.append(metrics["actor_loss"])
+                        actor_base_losses.append(metrics["actor_base_loss"])
+                        actor_nav_prior_losses.append(
+                            metrics["actor_nav_prior_loss"]
+                        )
+                        actor_nav_prior_weights.append(
+                            metrics["actor_nav_prior_weight"]
+                        )
+                        actor_nav_prior_match_rates.append(
+                            metrics["actor_nav_prior_match_rate"]
+                        )
+                        critic_losses.append(metrics["critic_loss"])
+                        actor_entropies.append(metrics["actor_entropy"])
+                        imagined_returns.append(metrics["imagined_return_mean"])
+                        imagined_rewards.append(metrics["imagined_reward_mean"])
+                        for key, values in imagined_reward_components.items():
+                            values.append(metrics[key])
             state_xy = result.state
             episode_states.append(state_xy.copy())
             observation = next_observation
@@ -1455,6 +1735,12 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
             if outage_array.size
             else 0.0
         )
+        for key, value in reward_component_sums.items():
+            history[key].append(float(value))
+        history["timeout_count"].append(float(timeout_count))
+        history["reward_component_residual_abs_max"].append(
+            float(max(reward_component_residuals, default=0.0))
+        )
         history["wm_loss"].append(
             float(np.mean(rssm_losses)) if rssm_losses else float("nan")
         )
@@ -1464,29 +1750,77 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
         history["actor_loss"].append(
             float(np.mean(actor_losses)) if actor_losses else 0.0
         )
+        history["actor_base_loss"].append(
+            float(np.mean(actor_base_losses)) if actor_base_losses else 0.0
+        )
+        history["actor_nav_prior_loss"].append(
+            float(np.mean(actor_nav_prior_losses))
+            if actor_nav_prior_losses
+            else 0.0
+        )
+        history["actor_nav_prior_weight"].append(
+            float(np.mean(actor_nav_prior_weights))
+            if actor_nav_prior_weights
+            else 0.0
+        )
+        history["actor_nav_prior_match_rate"].append(
+            float(np.mean(actor_nav_prior_match_rates))
+            if actor_nav_prior_match_rates
+            else 0.0
+        )
+        history["actor_nav_prior_pretrain_loss"].append(
+            float(actor_init_metrics["actor_nav_prior_pretrain_loss"])
+        )
+        history["actor_nav_prior_pretrain_match_rate"].append(
+            float(actor_init_metrics["actor_nav_prior_pretrain_match_rate"])
+        )
+        history["critic_nav_prior_init_loss"].append(
+            float(critic_init_metrics["critic_nav_prior_init_loss"])
+        )
+        history["critic_nav_prior_init_mae"].append(
+            float(critic_init_metrics["critic_nav_prior_init_mae"])
+        )
+        history["critic_nav_prior_init_target_mean"].append(
+            float(critic_init_metrics["critic_nav_prior_init_target_mean"])
+        )
         history["critic_loss"].append(
             float(np.mean(critic_losses)) if critic_losses else 0.0
+        )
+        history["actor_entropy"].append(
+            float(np.mean(actor_entropies)) if actor_entropies else 0.0
         )
         history["imagined_return_mean"].append(
             float(np.mean(imagined_returns)) if imagined_returns else 0.0
         )
-        history["measured_cells"].append(
-            float(len({(float(state[0]), float(state[1])) for state in episode_states}))
+        history["imagined_reward_mean"].append(
+            float(np.mean(imagined_rewards)) if imagined_rewards else 0.0
         )
+        for key, values in imagined_reward_components.items():
+            history[key].append(float(np.mean(values)) if values else 0.0)
+        history["rssm_ready_rate"].append(1.0)
+        history["actor_ready_rate"].append(1.0)
+        history["measured_points"].append(float(global_step))
+        history["measured_cells"].append(float(len(measured_cells)))
         trajectory_rows.extend(
             [float(episode), float(step), float(xy[0]), float(xy[1])]
             for step, xy in enumerate(episode_states)
         )
         episode_successes.append(float(result.terminal))
 
-        elapsed_min = (time.monotonic() - started_at) / 60.0
-        print(
-            f"WWM-NAV episode={episode}/{config.episodes} "
-            f"steps={int(env._step_count)} success={bool(result.terminal)} "
-            f"return={episode_return:.3f} mean_outage={history['mean_outage'][-1]:.4f} "
-            f"elapsed_min={elapsed_min:.1f}",
-            flush=True,
+        log_due = (
+            episode % TRAIN_LOG_INTERVAL_EPISODES == 0
+            or episode == config.episodes
         )
+        if log_due:
+            elapsed_min = (time.monotonic() - started_at) / 60.0
+            print(
+                f"WWM-NAV episode={episode}/{config.episodes} "
+                f"steps={int(env._step_count)} success={bool(result.terminal)} "
+                f"return={episode_return:.3f} "
+                f"mean_outage={history['mean_outage'][-1]:.4f} "
+                f"elapsed_min={elapsed_min:.1f}",
+                flush=True,
+            )
 
         checkpoint_due = (
             config.checkpoint_every_episodes > 0
@@ -1520,6 +1854,7 @@ def train(config: WWMNavConfig) -> dict[str, list[float]]:
                     "training_tasks": training_tasks,
                     "trajectory_rows": trajectory_rows,
                     "episode_successes": episode_successes,
+                    "measured_cells": measured_cells,
                     "actor_init_metrics": actor_init_metrics,
                     "critic_init_metrics": critic_init_metrics,
                     "rng_state": rng.bit_generator.state,
@@ -1610,6 +1945,7 @@ def save_training_artifacts(
     )
     provenance = {
         "experiment_contract": EXPERIMENT_CONTRACT,
+        "upstream_source_commit": UPSTREAM_SOURCE_COMMIT,
         "config_sha256": file_sha256(config.save_dir / "config.json"),
         "radiomap": str(config.radiomap_path),
         "radiomap_archive_sha256": file_sha256(config.radiomap_path),

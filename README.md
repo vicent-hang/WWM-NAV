@@ -1,21 +1,12 @@
 # WWM-NAV
 
-Repository: git@github.com:vicent-hang/WWM-NAV.git
+WWM-NAV implements multi-step UAV navigation with a physics-conditioned RSSM
+and a DreamerV3 discrete Actor-Critic. Training uses a generated SNARM-style
+radio environment and runs on CUDA by default.
 
-WWM-NAV is a compact open-source implementation of the research-one wireless world-model navigation path. It studies risk-aware UAV navigation on radio maps with a physics-conditioned RSSM world model and a Dreamer-style discrete Actor-Critic.
+Run the following commands from the repository root.
 
-The package intentionally contains only the navigation layer:
-
-- four grid actions: north, east, south, west;
-- radio-map outage feedback at visited UAV positions;
-- RSSM heads for observation, reward, outage, high-outage, and done prediction;
-- Actor-only execution with RSSM posterior feedback;
-- closed-loop RSSM imagination for Actor-Critic training;
-- optional SNARM-style distance-to-goal navigation prior.
-
-It does not include the communication/uplink controller layer, COMUDO power queues, or continual-learning COLD-RSSM protocols.
-
-## Install
+## Installation
 
 ```bash
 python -m venv .venv
@@ -23,16 +14,14 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-For development checks:
+For Ruff checks only:
 
 ```bash
-pip install -e .[dev]
+python -m pip install ruff
+ruff check .
 ```
 
-## Reproduce WWM-NAV
-
-Generate the registered physical radio environment, then verify its fields and
-formal experiment configuration:
+## Generate the radio environment
 
 ```bash
 python scripts/generate_radio_env.py \
@@ -40,25 +29,24 @@ python scripts/generate_radio_env.py \
   --seed 7 \
   --fast-fading-samples 1000 \
   --los-samples 100
-python scripts/verify_wwm_nav_setup.py --config configs/wwm_nav_default.yaml
+
+python scripts/verify_wwm_nav_setup.py \
+  --config configs/wwm_nav_default.yaml
 ```
 
-Verification also checks that the five generated core radio arrays reproduce
-the registered research-one map contents; the original generated output file
-does not need to be distributed.
-
-Run the registered 1,500-episode, 300-step experiment:
+## Train
 
 ```bash
-python scripts/train_wwm_nav.py --config configs/wwm_nav_default.yaml
+python scripts/train_wwm_nav.py \
+  --config configs/wwm_nav_default.yaml
 ```
 
-The YAML file is the standalone form of the original WWM-NAV command contract.
-Strict validation rejects accidental changes to effective research parameters.
-Training writes a resumable state every 20 episodes and saves the final model
-checkpoint after episode 1,500. It does not run evaluation during training.
+The default experiment runs for 1,500 episodes with at most 300 steps per
+episode. Formal training prints one progress line every 20 episodes and updates
+`training_state.pt` at the same interval. Evaluation is not run during training;
+the final checkpoint and training figures are written after training finishes.
 
-Resume an interrupted run without changing its output directory or config:
+Resume an interrupted run:
 
 ```bash
 python scripts/train_wwm_nav.py \
@@ -66,7 +54,10 @@ python scripts/train_wwm_nav.py \
   --resume outputs/wwm_nav_seed1/training_state.pt
 ```
 
-Evaluate the final checkpoint after training:
+Only resume a state created with the current experiment contract. Start a new
+run when using training states produced by an older implementation.
+
+## Evaluate the final checkpoint
 
 ```bash
 python scripts/evaluate_wwm_nav.py \
@@ -74,10 +65,7 @@ python scripts/evaluate_wwm_nav.py \
   --checkpoint outputs/wwm_nav_seed1/checkpoint.pt
 ```
 
-This writes `outputs/wwm_nav_seed1/eval_rollout.npz` and
-`eval_summary.json`.
-
-Evaluate the final checkpoint on the registered 100 shared random-start trials:
+## Run the 100-trial evaluation
 
 ```bash
 python scripts/evaluate_wwm_nav_trials.py \
@@ -90,10 +78,10 @@ python scripts/evaluate_wwm_nav_trials.py \
   --plot-all
 ```
 
-This writes the frozen `trial_pairs.csv`, per-trial `trial_metrics.csv` and
-`trial_metrics.npz`, one rollout archive per trial, and `summary.json`/`summary.md`.
+The evaluator saves the sampled trial pairs, each rollout, per-trial metrics,
+and aggregate statistics.
 
-Plot the evaluation trajectory:
+## Plot an evaluation trajectory
 
 ```bash
 python scripts/plot_trajectory.py \
@@ -102,63 +90,15 @@ python scripts/plot_trajectory.py \
   --output outputs/wwm_nav_seed1/eval_trajectory.png
 ```
 
-Console scripts are also registered after installation: `wwm-nav-train`,
-`wwm-nav-eval`, `wwm-nav-plot`, `wwm-nav-generate-radio-env`,
-and `wwm-nav-verify`.
+## Main training outputs
 
-## Repository Layout
+These files are saved under `outputs/wwm_nav_seed1/`:
 
-```text
-wwm_nav/
-  agent.py                 # WWM-NAV training/evaluation loop
-  env.py                   # Grid UAV navigation environment
-  radiomap.py              # Radio-map loader and physical context helpers
-  radio_env/               # WWM-NAV SNARM-style physical radio environment
-  models/
-    rssm.py                # RSSM world model
-    dreamer_actor_critic.py
-    losses.py
-  tools/plotting.py
-scripts/                    # CLI entrypoints
-configs/                    # Reference YAML config
-data/wwm_nav/               # Locally generated radio map
-```
-
-## Data Format
-
-`arr_0` stores outage probabilities, while `arr_1` and `arr_2` store the map
-axes. Physics-conditioned training also requires base-station geometry,
-sector angles, transmit power, building heights, and best-link map fields.
-Values near 1 mean higher outage risk.
-
-## Method Boundary
-
-The Actor objective uses the RSSM reward and done heads inside imagined
-rollouts. Outage prediction is supervised and logged, while risk primarily
-enters through the environment reward learned by the reward head.
-
-## Main Outputs
-
-Training writes:
-
-- `config.json`: resolved run configuration;
-- `history.csv`: per-episode metrics;
-- `training_tasks.csv`: exact sampled start/goal sequence;
-- `episode_trajectories.npz`: every training trajectory and episode-level risk summary;
-- `wwm_nav_training.png`: online multi-step return, success, outage, steps, RSSM error, and coverage curves;
-- `wwm_nav_world_model_training.png`: RSSM loss and outage-prediction diagnostics;
-- `wwm_nav_actor_critic_training.png`: Actor-Critic loss and imagined-return diagnostics;
-- `training_state.pt`: full resumable state, including replay and RNG states;
-- `provenance.json`: map, task, source-tree, Python, NumPy, Torch, CUDA, and cuDNN identity;
-- `checkpoint.pt`: final RSSM, Actor, and Critic weights used for evaluation.
-
-Evaluation writes:
-
-- `eval_rollout.npz`: states, actions, rewards, outages, success flag, and step count.
-- `shared_trials/trial_pairs.csv`: frozen shared start/goal tasks;
-- `shared_trials/trial_metrics.csv` and `trial_metrics.npz`: per-trial metrics;
-- `shared_trials/summary.json` and `summary.md`: aggregate statistics.
-
-## Evidence Boundary
-
-This repository packages the existing research-one navigation behavior as a standalone WWM-NAV codebase. The formal contract fixes source behavior, map contents, parameters, task RNG, and saved artifacts. Exact bitwise equality across different GPU architectures or Torch/CUDA/cuDNN versions is not guaranteed; `provenance.json` records that runtime boundary for each run.
+- `checkpoint.pt`: final RSSM, Actor, and Critic parameters.
+- `training_state.pt`: resumable training state.
+- `history.csv`: per-episode metrics.
+- `training_tasks.csv`: sampled start and goal positions.
+- `episode_trajectories.npz`: training trajectories.
+- `wwm_nav_training.png`: return, success, outage, steps, and measured cells.
+- `wwm_nav_world_model_training.png`: RSSM diagnostics.
+- `wwm_nav_actor_critic_training.png`: Actor-Critic diagnostics.

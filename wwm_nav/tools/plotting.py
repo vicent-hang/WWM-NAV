@@ -83,8 +83,13 @@ def plot_wwm_nav_world_model_training(history: dict[str, list[float]], output_pa
     for axis, key, title, label in (
         (axes[0, 0], "wm_loss", "RSSM training loss", "loss"),
         (axes[0, 1], "rssm_prior_outage_mae", "RSSM prior outage MAE", "MAE"),
-        (axes[1, 0], "mean_outage", "Measured mean outage", "outage"),
-        (axes[1, 1], "high_outage_rate", "High-outage rate", "rate"),
+        (axes[1, 0], "rssm_ready_rate", "RSSM availability", "ready rate"),
+        (
+            axes[1, 1],
+            "imagined_predicted_env_reward_mean",
+            "Imagined reward-head output",
+            "predicted reward",
+        ),
     ):
         _plot_episode_series(axis, history.get(key, []), label)
         axis.set_title(title)
@@ -102,19 +107,43 @@ def plot_wwm_nav_actor_critic_training(history: dict[str, list[float]], output_p
     import matplotlib.pyplot as plt
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8), dpi=160)
+    fig, axes = plt.subplots(3, 2, figsize=(12, 11), dpi=160)
     fig.suptitle("WWM-NAV Actor-Critic training")
-    for axis, key, title, label in (
-        (axes[0, 0], "actor_loss", "Actor loss", "actor loss"),
-        (axes[0, 1], "critic_loss", "Critic loss", "critic loss"),
-        (axes[1, 0], "imagined_return_mean", "Imagined return", "return"),
-        (axes[1, 1], "episode_return", "Episode return", "return"),
-    ):
-        _plot_episode_series(axis, history.get(key, []), label)
-        axis.set_title(title)
+    _plot_episode_series(axes[0, 0], history.get("actor_loss", []), "actor loss")
+    _plot_episode_series(
+        axes[0, 0], history.get("actor_base_loss", []), "actor base loss"
+    )
+    axes[0, 0].set_title("Actor loss")
+    _plot_episode_series(axes[0, 1], history.get("critic_loss", []), "critic loss")
+    axes[0, 1].set_title("Critic loss")
+    _plot_episode_series(
+        axes[1, 0], history.get("actor_entropy", []), "actor entropy"
+    )
+    axes[1, 0].set_title("Actor entropy")
+    _plot_episode_series(
+        axes[1, 1], history.get("imagined_return_mean", []), "imagined return"
+    )
+    _plot_episode_series(
+        axes[1, 1], history.get("imagined_reward_mean", []), "imagined reward"
+    )
+    axes[1, 1].set_title("Imagined targets")
+    _plot_episode_series(
+        axes[2, 0], history.get("actor_nav_prior_weight", []), "prior weight"
+    )
+    _plot_episode_series(
+        axes[2, 0], history.get("actor_nav_prior_match_rate", []), "prior match rate"
+    )
+    axes[2, 0].set_title("Navigation prior")
+    _plot_episode_series(
+        axes[2, 1], history.get("actor_ready_rate", []), "actor ready rate"
+    )
+    axes[2, 1].set_title("Actor availability")
+    axes[2, 1].set_ylim(-0.02, 1.02)
+    for axis in axes.ravel():
         axis.set_xlabel("episode")
         axis.grid(True, alpha=0.25)
-        axis.legend()
+        if axis.lines:
+            axis.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)

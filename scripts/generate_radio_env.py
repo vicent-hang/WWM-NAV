@@ -56,9 +56,13 @@ def main() -> None:
         best_sector=radio_data.best_sector,
         uav_height_km=np.asarray([radio_data.uav_height_km], dtype=np.float64),
         max_height_m=np.asarray([radio_data.max_height_m], dtype=np.float64),
-        bs_downtilt_deg=np.asarray([config.bs_downtilt_deg], dtype=np.float64),
-        carrier_freq_ghz=np.asarray([config.carrier_freq_ghz], dtype=np.float64),
-        los_samples=np.asarray([config.los_samples], dtype=np.int64),
+        bs_downtilt_deg=np.asarray(
+            [radio_data.bs_downtilt_deg], dtype=np.float64
+        ),
+        carrier_freq_ghz=np.asarray(
+            [radio_data.carrier_freq_ghz], dtype=np.float64
+        ),
+        los_samples=np.asarray([radio_data.los_samples], dtype=np.int64),
         fast_fading_samples=np.asarray([config.fast_fading_samples], dtype=np.int64),
         generation_seed=np.asarray([int(args.seed)], dtype=np.int64),
         wwm_nav_map_contract=np.asarray(WWM_NAV_MAP_CONTRACT),

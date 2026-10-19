@@ -7,6 +7,7 @@ from pathlib import Path
 
 from wwm_nav.agent import (
     EXPERIMENT_CONTRACT,
+    UPSTREAM_SOURCE_COMMIT,
     WWMNavConfig,
     serializable_config,
     validate_wwm_nav_config,
@@ -38,6 +39,7 @@ def main() -> None:
         json.dumps(config_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     print(f"experiment contract: {EXPERIMENT_CONTRACT}")
+    print(f"upstream source commit: {UPSTREAM_SOURCE_COMMIT}")
     print(f"config: {args.config}")
     print(f"config SHA-256: {config_digest}")
     print(f"map: {config.radiomap_path}")
