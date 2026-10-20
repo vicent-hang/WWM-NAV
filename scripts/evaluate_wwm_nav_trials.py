@@ -291,6 +291,101 @@ def write_outputs(save_dir: Path, pairs: list[tuple[np.ndarray, np.ndarray]], ro
         )
     (save_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     write_summary_markdown(save_dir / "summary.md", summary)
+    plot_trial_metrics(save_dir / "trial_metrics.png", rows, summary)
+
+
+def plot_trial_metrics(
+    path: Path,
+    rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+) -> None:
+    from wwm_nav.tools.plotting import configure_matplotlib
+
+    configure_matplotlib()
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    trials = np.asarray([row["trial"] for row in rows], dtype=np.float64)
+    success = np.asarray([row["success"] for row in rows], dtype=np.float64)
+    steps = np.asarray([row["steps"] for row in rows], dtype=np.float64)
+    mean_outage = np.asarray(
+        [row["mean_outage"] for row in rows], dtype=np.float64
+    )
+    max_outage = np.asarray([row["max_outage"] for row in rows], dtype=np.float64)
+    high_outage_count = np.asarray(
+        [row["high_outage_count"] for row in rows], dtype=np.float64
+    )
+    final_distance = np.asarray(
+        [row["final_distance_m"] for row in rows], dtype=np.float64
+    )
+    repeat_count = np.asarray(
+        [row["repeat_count"] for row in rows], dtype=np.float64
+    )
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8), dpi=160)
+    fig.suptitle(
+        "WWM-NAV shared-trial metrics "
+        f"(success_rate={summary['success_rate']:.3f}, trials={summary['num_trials']})"
+    )
+    axes[0, 0].bar(
+        ["success", "failure"],
+        [summary["success_count"], summary["failure_count"]],
+        color=["tab:blue", "tab:red"],
+    )
+    axes[0, 0].set_title("Outcome count")
+    axes[0, 0].set_ylabel("trials")
+
+    axes[0, 1].plot(trials, steps, marker="o", linewidth=1.0, markersize=3)
+    axes[0, 1].set_title("Steps per trial")
+    axes[0, 1].set_xlabel("trial")
+    axes[0, 1].set_ylabel("steps")
+
+    axes[0, 2].scatter(
+        mean_outage,
+        final_distance,
+        c=success,
+        cmap="coolwarm_r",
+        s=28,
+    )
+    axes[0, 2].set_title("Mean outage vs final distance")
+    axes[0, 2].set_xlabel("mean outage")
+    axes[0, 2].set_ylabel("final distance (m)")
+
+    axes[1, 0].hist(mean_outage, bins=20, alpha=0.75, label="mean")
+    axes[1, 0].hist(max_outage, bins=20, alpha=0.55, label="max")
+    axes[1, 0].set_title("Outage distribution")
+    axes[1, 0].set_xlabel("outage probability")
+    axes[1, 0].set_ylabel("trials")
+    axes[1, 0].legend()
+
+    axes[1, 1].plot(
+        trials,
+        high_outage_count,
+        marker="o",
+        linewidth=1.0,
+        markersize=3,
+    )
+    threshold = float(summary["setting"]["high_outage_threshold"])
+    axes[1, 1].set_title(f"High-outage step count (threshold={threshold:.3g})")
+    axes[1, 1].set_xlabel("trial")
+    axes[1, 1].set_ylabel("steps")
+
+    axes[1, 2].plot(
+        trials,
+        repeat_count,
+        marker="o",
+        linewidth=1.0,
+        markersize=3,
+    )
+    axes[1, 2].set_title("Repeated states")
+    axes[1, 2].set_xlabel("trial")
+    axes[1, 2].set_ylabel("count")
+
+    for axis in axes.ravel():
+        axis.grid(True, alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
 
 
 def plot_all_trajectories(path: Path, radio_map: RadioMap, rows: list[dict[str, Any]], rollouts: list[dict[str, object]]) -> None:
@@ -299,15 +394,73 @@ def plot_all_trajectories(path: Path, radio_map: RadioMap, rows: list[dict[str, 
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
     mesh = ax.contourf(radio_map.x_m, radio_map.y_m, radio_map.coverage.T, levels=20, cmap="viridis")
-    fig.colorbar(mesh, ax=ax, label="Coverage probability")
+    fig.colorbar(mesh, ax=ax, label="Coverage probability (1 - outage)")
+    success_label_added = False
+    failure_label_added = False
     for row, rollout in zip(rows, rollouts, strict=True):
         states = np.asarray(rollout["states"], dtype=np.float64)
-        color = "white" if row["success"] else "red"
-        ax.plot(states[:, 0], states[:, 1], color=color, alpha=0.7, linewidth=1.0)
-    ax.set_title("WWM-NAV shared navigation trials")
+        if states.ndim != 2 or states.shape[0] == 0:
+            continue
+        success = bool(row["success"])
+        label = None
+        if success and not success_label_added:
+            label = "successful trajectory"
+            success_label_added = True
+        elif not success and not failure_label_added:
+            label = "failed trajectory"
+            failure_label_added = True
+        ax.plot(
+            states[:, 0],
+            states[:, 1],
+            color="white" if success else "red",
+            alpha=0.72 if success else 0.95,
+            linewidth=1.0 if success else 2.8,
+            zorder=2 if success else 4,
+            label=label,
+        )
+        if not success:
+            ax.plot(states[-1, 0], states[-1, 1], "rx", markersize=6, zorder=5)
+
+    starts = np.asarray(
+        [[row["start_x"], row["start_y"]] for row in rows], dtype=np.float64
+    )
+    ax.scatter(
+        starts[:, 0],
+        starts[:, 1],
+        marker="*",
+        color="cyan",
+        edgecolors="black",
+        s=70,
+        linewidths=0.5,
+        zorder=6,
+        label="start",
+    )
+    goals = {
+        (float(row["goal_x"]), float(row["goal_y"]))
+        for row in rows
+    }
+    for goal_index, (goal_x, goal_y) in enumerate(sorted(goals)):
+        ax.plot(
+            goal_x,
+            goal_y,
+            marker="^",
+            color="blue",
+            markeredgecolor="white",
+            markersize=8,
+            linestyle="None",
+            zorder=7,
+            label="goal" if goal_index == 0 else None,
+        )
+
+    success_count = sum(int(row["success"]) for row in rows)
+    ax.set_title(
+        "WWM-NAV shared navigation trials "
+        f"({success_count}/{len(rows)} successful)"
+    )
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
     ax.set_aspect("equal", adjustable="box")
+    ax.legend(loc="upper left", fontsize=8)
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path)

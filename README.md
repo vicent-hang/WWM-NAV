@@ -79,7 +79,7 @@ python scripts/evaluate_wwm_nav_trials.py \
 ```
 
 The evaluator saves the sampled trial pairs, each rollout, per-trial metrics,
-and aggregate statistics.
+`trial_metrics.png`, `all_trajectories.png`, and aggregate statistics.
 
 ## Plot an evaluation trajectory
 
@@ -89,6 +89,8 @@ python scripts/plot_trajectory.py \
   --rollout outputs/wwm_nav_seed1/eval_rollout.npz \
   --output outputs/wwm_nav_seed1/eval_trajectory.png
 ```
+
+The final-checkpoint evaluator also writes `eval_trajectory.png` automatically.
 
 ## Main training outputs
 

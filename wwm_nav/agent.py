@@ -32,6 +32,7 @@ from wwm_nav.models.q_network import DuelingQNetwork
 from wwm_nav.models.rssm import RSSMConfig, RSSMWorldModel
 from wwm_nav.radiomap import RadioMap
 from wwm_nav.tools.plotting import (
+    plot_path_on_radiomap,
     plot_wwm_nav_actor_critic_training,
     plot_wwm_nav_training_history,
     plot_wwm_nav_world_model_training,
@@ -2001,11 +2002,24 @@ def evaluate(
         config, radio_map, rssm_model, actor, device, cache, deterministic=deterministic
     )
     config.save_dir.mkdir(parents=True, exist_ok=True)
-    np.savez(config.save_dir / "eval_rollout.npz", **rollout)
+    saved_rollout = {
+        **rollout,
+        "start_m": np.asarray(config.start_m, dtype=np.float64),
+        "goal_m": np.asarray(config.goal_m, dtype=np.float64),
+    }
+    np.savez(config.save_dir / "eval_rollout.npz", **saved_rollout)
     summary = rollout_summary(
         rollout, np.asarray(config.goal_m, dtype=np.float64), config.high_outage_threshold
     )
     (config.save_dir / "eval_summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    plot_path_on_radiomap(
+        radio_map,
+        np.asarray(rollout["states"], dtype=np.float64),
+        np.asarray(config.start_m, dtype=np.float64),
+        np.asarray(config.goal_m, dtype=np.float64),
+        config.save_dir / "eval_trajectory.png",
+        title="WWM-NAV final-checkpoint evaluation trajectory",
     )
     return rollout
