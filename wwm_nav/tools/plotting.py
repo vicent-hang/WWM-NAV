@@ -32,11 +32,11 @@ def plot_path_on_radiomap(
     mesh = ax.contourf(
         radio_map.x_m,
         radio_map.y_m,
-        radio_map.coverage.T,
+        radio_map.outage.T,
         levels=20,
         cmap="viridis",
     )
-    fig.colorbar(mesh, ax=ax, label="Coverage probability (1 - outage)")
+    fig.colorbar(mesh, ax=ax, label="Outage probability")
     ax.plot(
         path_m[:, 0],
         path_m[:, 1],

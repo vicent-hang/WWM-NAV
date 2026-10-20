@@ -393,8 +393,8 @@ def plot_all_trajectories(path: Path, radio_map: RadioMap, rows: list[dict[str, 
     configure_matplotlib()
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
-    mesh = ax.contourf(radio_map.x_m, radio_map.y_m, radio_map.coverage.T, levels=20, cmap="viridis")
-    fig.colorbar(mesh, ax=ax, label="Coverage probability (1 - outage)")
+    mesh = ax.contourf(radio_map.x_m, radio_map.y_m, radio_map.outage.T, levels=20, cmap="viridis")
+    fig.colorbar(mesh, ax=ax, label="Outage probability")
     success_label_added = False
     failure_label_added = False
     for row, rollout in zip(rows, rollouts, strict=True):
