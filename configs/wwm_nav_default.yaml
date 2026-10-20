@@ -86,6 +86,6 @@ actor_navigation_prior_critic_batch_size: 256
 sample_rssm_state: false
 mask_outbound_actions: true
 checkpoint_every_episodes: 20
-strict_wwm_nav_contract: true
+strict_wwm_nav_contract: false
 resume_checkpoint_path: null
 device: cuda
