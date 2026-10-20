@@ -101,6 +101,18 @@ python scripts/verify_wwm_nav_setup.py \
   --config configs/wwm_nav_default.yaml
 ```
 
+## Plot the standalone radio map
+
+```bash
+python scripts/plot_radio_map.py \
+  --radiomap data/wwm_nav/radioenvir_wwm_nav.npz \
+  --output data/wwm_nav/radioenvir_wwm_nav.png
+```
+
+The figure shows outage probability on a fixed 0-to-1 color scale. Dark regions
+have lower outage probability, while bright regions have higher outage
+probability. It does not include training or evaluation trajectories.
+
 ## Train
 
 ```bash

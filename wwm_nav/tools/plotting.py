@@ -16,6 +16,37 @@ def configure_matplotlib() -> None:
     matplotlib.use("Agg")
 
 
+def plot_radio_map(
+    radio_map: RadioMap,
+    output_path: Path,
+    title: str = "WWM-NAV outage-probability radio map",
+    dpi: int = 180,
+) -> None:
+    """Save a standalone outage-probability map without trajectory overlays."""
+    configure_matplotlib()
+    import matplotlib.pyplot as plt
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7, 6), dpi=dpi)
+    levels = np.linspace(0.0, 1.0, 21)
+    mesh = ax.contourf(
+        radio_map.x_m,
+        radio_map.y_m,
+        radio_map.outage.T,
+        levels=levels,
+        cmap="viridis",
+    )
+    colorbar = fig.colorbar(mesh, ax=ax, ticks=np.linspace(0.0, 1.0, 6))
+    colorbar.set_label("Outage probability")
+    ax.set_title(title)
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    ax.set_aspect("equal", adjustable="box")
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
 def plot_path_on_radiomap(
     radio_map: RadioMap,
     path_m: np.ndarray,
