@@ -21,6 +21,73 @@ python -m pip install ruff
 ruff check .
 ```
 
+## Reproducible CUDA environment
+
+The reference WWM-NAV environment uses Python 3.10, PyTorch 2.5.1, and the
+CUDA 12.1 PyTorch runtime. For reproducible experiments on Linux with an NVIDIA
+GPU, create an isolated environment:
+
+```bash
+conda create -n wwm-nav-cu121 python=3.10 -y
+conda activate wwm-nav-cu121
+which python
+python --version
+```
+
+Install the official
+[PyTorch 2.5.1 CUDA 12.1 wheels](https://docs.pytorch.org/get-started/previous-versions/):
+
+```bash
+python -m pip install \
+  torch==2.5.1 \
+  torchvision==0.20.1 \
+  torchaudio==2.5.1 \
+  --index-url https://download.pytorch.org/whl/cu121
+```
+
+Install the reference core dependencies, then install this repository without
+allowing its broad dependency ranges to replace the pinned versions:
+
+```bash
+python -m pip install \
+  numpy==2.2.5 \
+  matplotlib==3.10.9 \
+  PyYAML==6.0.3
+
+python -m pip install -e . --no-deps
+```
+
+Verify the active runtime before training:
+
+```bash
+python -c "import torch, numpy, matplotlib, yaml; print('PyTorch:', torch.__version__); print('CUDA:', torch.version.cuda); print('cuDNN:', torch.backends.cudnn.version()); print('NumPy:', numpy.__version__); print('Matplotlib:', matplotlib.__version__); print('PyYAML:', yaml.__version__); print('GPU:', torch.cuda.get_device_name(0)); print('CUDA available:', torch.cuda.is_available())"
+```
+
+The key expected values are `PyTorch: 2.5.1+cu121`, `CUDA: 12.1`,
+`NumPy: 2.2.5`, `Matplotlib: 3.10.9`, and `PyYAML: 6.0.3`. The CUDA version
+reported by `nvidia-smi` is the maximum version supported by the driver; use
+`torch.version.cuda` to verify the runtime used by PyTorch.
+
+Before comparing training results across systems, confirm that every run uses
+the same source revision, configuration, and radio map:
+
+```bash
+git rev-parse HEAD
+git status --short
+sha256sum configs/wwm_nav_default.yaml
+sha256sum data/wwm_nav/radioenvir_wwm_nav.npz
+```
+
+Training states are environment- and configuration-specific. When changing the
+software environment or experiment configuration, start from a new output
+directory instead of resuming an existing `training_state.pt`:
+
+```bash
+python scripts/train_wwm_nav.py \
+  --config configs/wwm_nav_default.yaml \
+  --save-dir outputs/wwm_nav_cu121_seed1
+```
+
 ## Generate the radio environment
 
 ```bash
