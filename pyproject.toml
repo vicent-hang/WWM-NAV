@@ -33,6 +33,9 @@ wwm-nav-plot = "scripts.plot_trajectory:main"
 wwm-nav-plot-radio-map = "scripts.plot_radio_map:main"
 wwm-nav-generate-radio-env = "scripts.generate_radio_env:main"
 wwm-nav-verify = "scripts.verify_wwm_nav_setup:main"
+wwm-nav-plot-magazine = "scripts.plot_navigation_magazine_case_study:main"
+wwm-nav-plot-radio-scene = "scripts.plot_navigation_radio_map_scene:main"
+wwm-nav-plot-city-25d = "scripts.plot_navigation_25d_city_radio_map:main"
 
 [tool.setuptools.packages.find]
 include = ["wwm_nav*", "scripts*"]

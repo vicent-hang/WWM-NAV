@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("data/wwm_nav/radioenvir_wwm_nav.png"),
+        default=Path("outputs/radioenvir_wwm_nav.png"),
     )
     parser.add_argument(
         "--title",

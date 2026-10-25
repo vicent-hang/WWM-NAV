@@ -68,7 +68,7 @@ class WWMNavConfig:
     actor_batch_size: int = 128
     rssm_updates_per_step: int = 1
     actor_updates_per_step: int = 1
-    outage_penalty: float = 5.0
+    outage_penalty: float = 10.0
     high_outage_reward_penalty: float = 0.0
     high_outage_threshold: float = 0.45
     terminal_reward: float = 200.0
@@ -189,7 +189,7 @@ def validate_wwm_nav_config(config: WWMNavConfig) -> None:
         "actor_batch_size": 128,
         "rssm_updates_per_step": 1,
         "actor_updates_per_step": 1,
-        "outage_penalty": 5.0,
+        "outage_penalty": 10.0,
         "high_outage_reward_penalty": 0.0,
         "high_outage_threshold": 0.45,
         "terminal_reward": 200.0,

@@ -106,12 +106,13 @@ python scripts/verify_wwm_nav_setup.py \
 ```bash
 python scripts/plot_radio_map.py \
   --radiomap data/wwm_nav/radioenvir_wwm_nav.npz \
-  --output data/wwm_nav/radioenvir_wwm_nav.png
+  --output outputs/radioenvir_wwm_nav.png
 ```
 
 The figure shows outage probability on a fixed 0-to-1 color scale. Dark regions
 have lower outage probability, while bright regions have higher outage
-probability. It does not include training or evaluation trajectories.
+probability. It does not include training or evaluation trajectories. Generated
+figures are kept under `outputs/`; `data/` contains experiment inputs only.
 
 ## Train
 
@@ -170,6 +171,23 @@ python scripts/plot_trajectory.py \
 ```
 
 The final-checkpoint evaluator also writes `eval_trajectory.png` automatically.
+
+## Reproduce the magazine figures
+
+Publication-ready reference figures and their provenance-bound 100-trial
+comparison data are stored in `reference/magazine/`. The plotting scripts use
+repository-relative inputs and write regenerated figures to `outputs/` by
+default:
+
+```bash
+python -m scripts.plot_navigation_magazine_case_study
+python -m scripts.plot_navigation_radio_map_scene
+python -m scripts.plot_navigation_25d_city_radio_map
+```
+
+Add `--overwrite` when replacing files already generated in the output
+directory. See `reference/magazine/README.md` for the evidence boundary and
+the contents of each panel.
 
 ## Main training outputs
 

@@ -11,7 +11,7 @@ class NavigationConfig:
     y_max_m: float = 2000.0
     goal_tolerance_m: float = 30.0
     move_penalty: float = 1.0
-    outage_penalty: float = 5.0
+    outage_penalty: float = 10.0
     high_outage_threshold: float = 0.45
     high_outage_reward_penalty: float = 0.0
     terminal_reward: float = 200.0

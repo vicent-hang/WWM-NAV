@@ -23,6 +23,10 @@ checkpoints/
 *.csv
 *.jsonl
 
+# Published, provenance-bound magazine figures and their compact source data.
+!reference/
+!reference/**
+
 # OS/editor
 .DS_Store
 .vscode/
